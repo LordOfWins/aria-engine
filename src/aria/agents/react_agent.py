@@ -4,10 +4,12 @@ Think → Act → Observe 루프 기반 자율 추론 에이전트
 - 질문 분석 → 검색 전략 결정 → 실행 → 결과 검증 → 답변
 - Self-Reflection 노드로 답변 품질 자체 평가
 - 최대 반복 횟수 제한으로 무한루프 방지
+- 구조화된 에러 처리 (AgentError / LLM / VectorStore 예외 분리)
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Annotated
@@ -16,6 +18,13 @@ import structlog
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
+from aria.core.exceptions import (
+    AgentError,
+    CollectionNotFoundError,
+    KillSwitchError,
+    LLMAllProvidersExhaustedError,
+    VectorStoreError,
+)
 from aria.providers.llm_provider import LLMProvider
 from aria.rag.vector_store import VectorStore
 
@@ -38,6 +47,7 @@ class AgentState:
     """에이전트 상태 (LangGraph State)"""
     messages: Annotated[list[dict[str, str]], add_messages] = field(default_factory=list)
     query: str = ""
+    collection: str = "default"  # 컬렉션을 state에 포함 (race condition 방지)
     intent: dict[str, Any] = field(default_factory=dict)
     search_results: list[dict[str, Any]] = field(default_factory=list)
     reasoning_steps: list[str] = field(default_factory=list)
@@ -45,6 +55,7 @@ class AgentState:
     confidence: float = 0.0
     iteration: int = 0
     should_stop: bool = False
+    error: str = ""  # 에러 메시지 전달용
 
 
 INTENT_ANALYSIS_PROMPT = """당신은 사용자 의도 분석 전문가입니다.
@@ -58,6 +69,8 @@ INTENT_ANALYSIS_PROMPT = """당신은 사용자 의도 분석 전문가입니다
     "complexity": "simple|moderate|complex",
     "recommended_action": "search_knowledge|reason|respond|clarify"
 }}
+
+반드시 위 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요.
 
 사용자 질문: {query}"""
 
@@ -105,13 +118,56 @@ SELF_REFLECTION_PROMPT = """당신은 답변 품질 평가 전문가입니다.
 3. 논리적 오류가 없는가?
 4. 사용자의 숨겨진 의도도 충족하는가?
 
-JSON으로 응답하세요:
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요.
 {{
     "quality_score": 0.0~1.0,
     "issues": ["발견된 문제점"],
     "should_retry": true/false,
     "improvement_suggestion": "개선 방향"
 }}"""
+
+
+def _safe_parse_json(content: str) -> dict[str, Any] | None:
+    """LLM 응답에서 JSON을 안전하게 추출/파싱
+
+    지원 패턴:
+    - 순수 JSON
+    - ```json ... ``` 블록
+    - ``` ... ``` 블록
+    - JSON 앞뒤에 텍스트가 있는 경우
+    """
+    # 1. ```json 블록 추출
+    if "```json" in content:
+        try:
+            extracted = content.split("```json")[1].split("```")[0]
+            return json.loads(extracted.strip())
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+    # 2. ``` 블록 추출
+    if "```" in content:
+        try:
+            extracted = content.split("```")[1].split("```")[0]
+            return json.loads(extracted.strip())
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+    # 3. 순수 JSON 시도
+    try:
+        return json.loads(content.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # 4. { } 브래킷 범위 추출
+    first_brace = content.find("{")
+    last_brace = content.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(content[first_brace : last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 class ReActAgent:
@@ -171,23 +227,35 @@ class ReActAgent:
         """Step 1: 사용자 의도 분석"""
         prompt = INTENT_ANALYSIS_PROMPT.format(query=state.query)
 
-        result = await self.llm.complete(
-            prompt,
-            model_tier="cheap",  # 의도 분석은 저비용 모델로 충분
-            temperature=0.3,
-        )
+        try:
+            result = await self.llm.complete(
+                prompt,
+                model_tier="cheap",  # 의도 분석은 저비용 모델로 충분
+                temperature=0.3,
+            )
+        except (KillSwitchError, LLMAllProvidersExhaustedError):
+            raise  # 상위로 전파
+        except Exception as e:
+            logger.error("intent_analysis_failed", error=str(e))
+            # 의도 분석 실패해도 기본값으로 계속 진행
+            return {
+                "intent": {
+                    "surface_intent": state.query,
+                    "deeper_intent": "",
+                    "required_knowledge": [],
+                    "search_queries": [state.query],
+                    "complexity": "moderate",
+                    "recommended_action": "search_knowledge",
+                }
+            }
 
         # JSON 파싱 시도
-        import json
-        try:
-            content = result["content"]
-            # JSON 블록 추출
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-            intent = json.loads(content.strip())
-        except (json.JSONDecodeError, IndexError):
+        intent = _safe_parse_json(result["content"])
+        if intent is None:
+            logger.warning(
+                "intent_json_parse_failed",
+                content_preview=result["content"][:200],
+            )
             intent = {
                 "surface_intent": state.query,
                 "deeper_intent": "",
@@ -213,24 +281,30 @@ class ReActAgent:
 
     async def _search_knowledge(self, state: AgentState) -> dict[str, Any]:
         """Step 2: 지식 검색 (RAG)"""
-        # 이미 검색 결과가 있으면 재검색 안 함
-        if state.search_results:
-            logger.debug("search_skipped", reason="already_has_results")
+        # 이미 검색 결과가 있으면 재검색 안 함 (retry 루프 시)
+        if state.search_results and state.iteration > 0:
+            logger.debug("search_skipped", reason="already_has_results_in_retry")
             return {"search_results": state.search_results}
 
         queries = state.intent.get("search_queries", [state.query])
         all_results: list[dict[str, Any]] = []
+        collection = state.collection  # state에서 컬렉션 참조 (race condition 방지)
 
         for query in queries[:3]:  # 최대 3개 쿼리
             try:
                 results = self.vector_store.search(
-                    collection_name=self._collection,
+                    collection_name=collection,
                     query=query,
                     top_k=3,
                 )
                 all_results.extend(results)
-            except Exception as e:
+            except CollectionNotFoundError:
+                logger.warning("collection_not_found", collection=collection, query=query)
+                # 컬렉션 없으면 검색 결과 없이 진행 (추론만으로 답변)
+                break
+            except VectorStoreError as e:
                 logger.warning("search_failed", query=query, error=str(e))
+                continue
 
         # 중복 제거 + 점수순 정렬
         seen_texts: set[str] = set()
@@ -259,11 +333,21 @@ class ReActAgent:
             previous_reasoning=previous,
         )
 
-        result = await self.llm.complete(
-            prompt,
-            model_tier="default",
-            temperature=0.5,
-        )
+        try:
+            result = await self.llm.complete(
+                prompt,
+                model_tier="default",
+                temperature=0.5,
+            )
+        except (KillSwitchError, LLMAllProvidersExhaustedError):
+            raise
+        except Exception as e:
+            logger.error("reasoning_failed", error=str(e), iteration=state.iteration)
+            raise AgentError(
+                f"추론 단계 실패: {e}",
+                query=state.query,
+                iteration=state.iteration,
+            ) from e
 
         new_steps = state.reasoning_steps + [f"[Iteration {state.iteration + 1}] {result['content'][:500]}"]
 
@@ -275,35 +359,47 @@ class ReActAgent:
 
     async def _self_reflect(self, state: AgentState) -> dict[str, Any]:
         """Step 4: 자기 성찰 - 답변 품질 평가"""
+        # 최대 반복 횟수 도달 시 성찰 스킵 (비용 절감)
+        if state.iteration >= MAX_ITERATIONS:
+            logger.info("self_reflect_skipped", reason="max_iterations_reached")
+            return {"confidence": 0.6, "should_stop": True}
+
         prompt = SELF_REFLECTION_PROMPT.format(
             query=state.query,
             intent=str(state.intent),
-            answer=state.current_answer,
+            answer=state.current_answer[:2000],  # 너무 긴 답변은 잘라서 평가
         )
 
-        result = await self.llm.complete(
-            prompt,
-            model_tier="cheap",
-            temperature=0.2,
-        )
-
-        import json
         try:
-            content = result["content"]
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-            reflection = json.loads(content.strip())
-        except (json.JSONDecodeError, IndexError):
-            reflection = {"quality_score": 0.7, "should_retry": False}
+            result = await self.llm.complete(
+                prompt,
+                model_tier="cheap",
+                temperature=0.2,
+            )
+        except (KillSwitchError, LLMAllProvidersExhaustedError):
+            raise
+        except Exception as e:
+            # 성찰 실패해도 현재 답변으로 진행
+            logger.warning("self_reflect_failed", error=str(e))
+            return {"confidence": 0.6, "should_stop": True}
+
+        reflection = _safe_parse_json(result["content"])
+        if reflection is None:
+            logger.warning(
+                "reflection_json_parse_failed",
+                content_preview=result["content"][:200],
+            )
+            return {"confidence": 0.7, "should_stop": True}
 
         confidence = reflection.get("quality_score", 0.7)
         should_retry = reflection.get("should_retry", False)
 
-        # 최대 반복 횟수 도달 시 강제 종료
-        if state.iteration >= MAX_ITERATIONS:
-            should_retry = False
+        logger.info(
+            "self_reflection_result",
+            confidence=confidence,
+            should_retry=should_retry,
+            issues=reflection.get("issues", []),
+        )
 
         return {
             "confidence": confidence,
@@ -320,8 +416,14 @@ class ReActAgent:
 
     async def _respond(self, state: AgentState) -> dict[str, Any]:
         """Step 5: 최종 답변 생성"""
+        answer = state.current_answer
+        if not answer and state.error:
+            answer = f"요청을 처리하는 중 문제가 발생했습니다: {state.error}"
+        elif not answer:
+            answer = "죄송합니다. 질문에 대한 답변을 생성하지 못했습니다. 질문을 다시 표현해주세요."
+
         return {
-            "messages": [{"role": "assistant", "content": state.current_answer}],
+            "messages": [{"role": "assistant", "content": answer}],
         }
 
     async def run(
@@ -338,17 +440,27 @@ class ReActAgent:
             context: 이전 대화 이력
 
         Returns:
-            {"answer": str, "confidence": float, "reasoning_steps": list, "usage_summary": dict}
-        """
-        self._collection = collection
+            {"answer": str, "confidence": float, "reasoning_steps": list, "cost_summary": dict, ...}
 
+        Raises:
+            KillSwitchError: 비용 상한 초과
+            LLMAllProvidersExhaustedError: 모든 LLM 프로바이더 실패
+            AgentError: 에이전트 내부 에러
+        """
         initial_state = AgentState(
             query=query,
+            collection=collection,
             messages=context or [],
         )
 
-        # LangGraph 실행
-        final_state = await self._graph.ainvoke(initial_state)
+        try:
+            # LangGraph 실행
+            final_state = await self._graph.ainvoke(initial_state)
+        except (KillSwitchError, LLMAllProvidersExhaustedError):
+            raise  # 그대로 전파 → API 레이어에서 적절한 HTTP status로 변환
+        except Exception as e:
+            logger.error("agent_run_failed", query=query[:100], error=str(e))
+            raise AgentError(f"에이전트 실행 실패: {e}", query=query) from e
 
         return {
             "answer": final_state.get("current_answer", ""),

@@ -4,6 +4,7 @@
 - 로컬 임베딩 (FastEmbed) → API 비용 0원
 - Qdrant 셀프호스팅 → 클라우드 종속 없음
 - 컬렉션 기반 지식 분리 → 제품별/도메인별 격리
+- 구조화된 예외 처리 → CollectionNotFoundError 등
 """
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ from typing import Any
 import structlog
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from aria.core.config import AriaConfig, get_config
+from aria.core.exceptions import CollectionNotFoundError, VectorStoreError
 
 logger = structlog.get_logger()
 
@@ -26,27 +29,32 @@ class VectorStore:
 
     사용법:
         store = VectorStore()
-        await store.ensure_collection("psychology_kb")
-        await store.add_documents("psychology_kb", [
+        store.ensure_collection("psychology_kb")
+        store.add_documents("psychology_kb", [
             {"text": "회피형 애착은...", "metadata": {"source": "dsm5", "topic": "attachment"}}
         ])
-        results = await store.search("psychology_kb", "회피형 애착 패턴", top_k=5)
+        results = store.search("psychology_kb", "회피형 애착 패턴", top_k=5)
     """
 
     def __init__(self, config: AriaConfig | None = None) -> None:
         self.config = config or get_config()
 
         # Qdrant 클라이언트 초기화
-        if self.config.qdrant.url:
-            self._client = QdrantClient(
-                url=self.config.qdrant.url,
-                api_key=self.config.qdrant.api_key or None,
-            )
-        else:
-            self._client = QdrantClient(
-                host=self.config.qdrant.host,
-                port=self.config.qdrant.port,
-            )
+        try:
+            if self.config.qdrant.url:
+                self._client = QdrantClient(
+                    url=self.config.qdrant.url,
+                    api_key=self.config.qdrant.api_key or None,
+                    timeout=10,
+                )
+            else:
+                self._client = QdrantClient(
+                    host=self.config.qdrant.host,
+                    port=self.config.qdrant.port,
+                    timeout=10,
+                )
+        except Exception as e:
+            raise VectorStoreError(f"Qdrant 연결 실패: {e}") from e
 
         # FastEmbed 로컬 임베딩 모델
         self._embedder = TextEmbedding(model_name=self.config.llm.embedding_model)
@@ -66,21 +74,29 @@ class VectorStore:
         hash_bytes = hashlib.md5(text.encode()).hexdigest()
         return str(uuid.UUID(hash_bytes))
 
+    def _collection_exists(self, collection_name: str) -> bool:
+        """컬렉션 존재 여부 확인"""
+        try:
+            collections = self._client.get_collections().collections
+            return any(c.name == collection_name for c in collections)
+        except Exception as e:
+            raise VectorStoreError(f"컬렉션 목록 조회 실패: {e}", collection=collection_name) from e
+
     def ensure_collection(self, collection_name: str) -> None:
         """컬렉션 존재 확인 → 없으면 생성"""
-        collections = self._client.get_collections().collections
-        existing_names = [c.name for c in collections]
-
-        if collection_name not in existing_names:
+        if not self._collection_exists(collection_name):
             vector_size = self._get_vector_size()
-            self._client.create_collection(
-                collection_name=collection_name,
-                vectors_config=models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE,
-                ),
-            )
-            logger.info("collection_created", name=collection_name, vector_size=vector_size)
+            try:
+                self._client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=models.VectorParams(
+                        size=vector_size,
+                        distance=models.Distance.COSINE,
+                    ),
+                )
+                logger.info("collection_created", name=collection_name, vector_size=vector_size)
+            except Exception as e:
+                raise VectorStoreError(f"컬렉션 생성 실패: {e}", collection=collection_name) from e
         else:
             logger.debug("collection_exists", name=collection_name)
 
@@ -99,7 +115,13 @@ class VectorStore:
 
         Returns:
             저장된 문서 수
+
+        Raises:
+            VectorStoreError: 문서 저장 실패
         """
+        if not documents:
+            return 0
+
         self.ensure_collection(collection_name)
 
         texts = [doc["text"] for doc in documents]
@@ -109,23 +131,36 @@ class VectorStore:
             batch_texts = texts[i : i + batch_size]
             batch_docs = documents[i : i + batch_size]
 
-            # 로컬 임베딩 생성
-            embeddings = list(self._embedder.embed(batch_texts))
+            try:
+                # 로컬 임베딩 생성
+                embeddings = list(self._embedder.embed(batch_texts))
 
-            points = [
-                models.PointStruct(
-                    id=self._generate_deterministic_id(doc["text"]),
-                    vector=embedding.tolist(),
-                    payload={
-                        "text": doc["text"],
-                        **(doc.get("metadata", {})),
-                    },
+                points = [
+                    models.PointStruct(
+                        id=self._generate_deterministic_id(doc["text"]),
+                        vector=embedding.tolist(),
+                        payload={
+                            "text": doc["text"],
+                            **(doc.get("metadata", {})),
+                        },
+                    )
+                    for doc, embedding in zip(batch_docs, embeddings)
+                ]
+
+                self._client.upsert(collection_name=collection_name, points=points)
+                total_added += len(points)
+            except Exception as e:
+                logger.error(
+                    "batch_upsert_failed",
+                    collection=collection_name,
+                    batch_start=i,
+                    batch_size=len(batch_texts),
+                    error=str(e),
                 )
-                for doc, embedding in zip(batch_docs, embeddings)
-            ]
-
-            self._client.upsert(collection_name=collection_name, points=points)
-            total_added += len(points)
+                raise VectorStoreError(
+                    f"문서 저장 실패 (batch {i}~{i + len(batch_texts)}): {e}",
+                    collection=collection_name,
+                ) from e
 
         logger.info("documents_added", collection=collection_name, count=total_added)
         return total_added
@@ -150,37 +185,50 @@ class VectorStore:
 
         Returns:
             [{"text": str, "score": float, "metadata": dict}, ...]
+
+        Raises:
+            CollectionNotFoundError: 컬렉션 미존재
+            VectorStoreError: 검색 실패
         """
-        query_embedding = list(self._embedder.embed([query]))[0]
+        # 컬렉션 존재 확인
+        if not self._collection_exists(collection_name):
+            raise CollectionNotFoundError(collection_name)
 
-        search_params: dict[str, Any] = {
-            "collection_name": collection_name,
-            "query_vector": query_embedding.tolist(),
-            "limit": top_k,
-            "score_threshold": score_threshold,
-        }
+        try:
+            query_embedding = list(self._embedder.embed([query]))[0]
 
-        if filter_conditions:
-            search_params["query_filter"] = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key=key,
-                        match=models.MatchValue(value=value),
-                    )
-                    for key, value in filter_conditions.items()
-                ]
-            )
+            search_kwargs: dict[str, Any] = {
+                "collection_name": collection_name,
+                "query": query_embedding.tolist(),
+                "limit": top_k,
+                "score_threshold": score_threshold,
+            }
 
-        results = self._client.query_points(
-            collection_name=collection_name,
-            query=query_embedding.tolist(),
-            limit=top_k,
-            score_threshold=score_threshold,
-        ).points
+            if filter_conditions:
+                search_kwargs["query_filter"] = models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key=key,
+                            match=models.MatchValue(value=value),
+                        )
+                        for key, value in filter_conditions.items()
+                    ]
+                )
+
+            results = self._client.query_points(**search_kwargs).points
+
+        except CollectionNotFoundError:
+            raise
+        except UnexpectedResponse as e:
+            if "Not found" in str(e) or "doesn't exist" in str(e):
+                raise CollectionNotFoundError(collection_name) from e
+            raise VectorStoreError(f"벡터 검색 실패: {e}", collection=collection_name) from e
+        except Exception as e:
+            raise VectorStoreError(f"벡터 검색 실패: {e}", collection=collection_name) from e
 
         output = []
         for point in results:
-            payload = point.payload or {}
+            payload = dict(point.payload) if point.payload else {}
             text = payload.pop("text", "")
             output.append({
                 "text": text,
@@ -192,16 +240,36 @@ class VectorStore:
         return output
 
     def delete_collection(self, collection_name: str) -> None:
-        """컬렉션 삭제"""
-        self._client.delete_collection(collection_name=collection_name)
-        logger.info("collection_deleted", name=collection_name)
+        """컬렉션 삭제
+
+        Raises:
+            CollectionNotFoundError: 컬렉션 미존재
+        """
+        if not self._collection_exists(collection_name):
+            raise CollectionNotFoundError(collection_name)
+
+        try:
+            self._client.delete_collection(collection_name=collection_name)
+            logger.info("collection_deleted", name=collection_name)
+        except Exception as e:
+            raise VectorStoreError(f"컬렉션 삭제 실패: {e}", collection=collection_name) from e
 
     def get_collection_info(self, collection_name: str) -> dict[str, Any]:
-        """컬렉션 정보 조회"""
-        info = self._client.get_collection(collection_name=collection_name)
-        return {
-            "name": collection_name,
-            "vectors_count": info.vectors_count,
-            "points_count": info.points_count,
-            "status": info.status.value if info.status else "unknown",
-        }
+        """컬렉션 정보 조회
+
+        Raises:
+            CollectionNotFoundError: 컬렉션 미존재
+        """
+        if not self._collection_exists(collection_name):
+            raise CollectionNotFoundError(collection_name)
+
+        try:
+            info = self._client.get_collection(collection_name=collection_name)
+            return {
+                "name": collection_name,
+                "vectors_count": info.vectors_count,
+                "points_count": info.points_count,
+                "status": info.status.value if info.status else "unknown",
+            }
+        except Exception as e:
+            raise VectorStoreError(f"컬렉션 정보 조회 실패: {e}", collection=collection_name) from e
