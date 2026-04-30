@@ -30,6 +30,7 @@ from aria.core.exceptions import (
     KillSwitchError,
     LLMAllProvidersExhaustedError,
     LLMProviderError,
+    NoAPIKeyError,
     CollectionNotFoundError,
     VectorStoreError,
     AgentError,
@@ -175,6 +176,19 @@ async def agent_error_handler(request: Request, exc: AgentError) -> JSONResponse
         content={
             "error": exc.code,
             "message": "에이전트 처리 중 오류가 발생했습니다.",
+            "details": exc.details,
+        },
+    )
+
+
+@app.exception_handler(NoAPIKeyError)
+async def no_api_key_handler(request: Request, exc: NoAPIKeyError) -> JSONResponse:
+    logger.error("no_api_key_http", path=request.url.path, details=exc.details)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": exc.code,
+            "message": exc.message,
             "details": exc.details,
         },
     )

@@ -23,6 +23,7 @@ from aria.core.exceptions import (
     CollectionNotFoundError,
     KillSwitchError,
     LLMAllProvidersExhaustedError,
+    NoAPIKeyError,
     VectorStoreError,
 )
 from aria.providers.llm_provider import LLMProvider
@@ -233,7 +234,7 @@ class ReActAgent:
                 model_tier="cheap",  # 의도 분석은 저비용 모델로 충분
                 temperature=0.3,
             )
-        except (KillSwitchError, LLMAllProvidersExhaustedError):
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
             raise  # 상위로 전파
         except Exception as e:
             logger.error("intent_analysis_failed", error=str(e))
@@ -339,7 +340,7 @@ class ReActAgent:
                 model_tier="default",
                 temperature=0.5,
             )
-        except (KillSwitchError, LLMAllProvidersExhaustedError):
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
             raise
         except Exception as e:
             logger.error("reasoning_failed", error=str(e), iteration=state.iteration)
@@ -376,7 +377,7 @@ class ReActAgent:
                 model_tier="cheap",
                 temperature=0.2,
             )
-        except (KillSwitchError, LLMAllProvidersExhaustedError):
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
             raise
         except Exception as e:
             # 성찰 실패해도 현재 답변으로 진행
@@ -456,7 +457,7 @@ class ReActAgent:
         try:
             # LangGraph 실행
             final_state = await self._graph.ainvoke(initial_state)
-        except (KillSwitchError, LLMAllProvidersExhaustedError):
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
             raise  # 그대로 전파 → API 레이어에서 적절한 HTTP status로 변환
         except Exception as e:
             logger.error("agent_run_failed", query=query[:100], error=str(e))

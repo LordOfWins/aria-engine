@@ -29,6 +29,7 @@ from aria.core.exceptions import (
     KillSwitchError,
     LLMAllProvidersExhaustedError,
     LLMProviderError,
+    NoAPIKeyError,
 )
 
 logger = structlog.get_logger()
@@ -127,6 +128,31 @@ class LLMProvider:
             "fallback": [self.config.llm.fallback_model],
         }
 
+        # 키 없는 모델 경고 로그
+        missing = self.config.get_missing_key_models()
+        if missing:
+            for model, env_var in missing:
+                logger.warning(
+                    "api_key_missing",
+                    model=model,
+                    env_var=env_var,
+                    hint=f".env에 {env_var}를 설정하세요",
+                )
+
+        available = self.config.get_available_models()
+        if not available:
+            logger.error(
+                "no_api_keys_configured",
+                message="사용 가능한 API 키가 없습니다. 모든 LLM 호출이 실패합니다.",
+                configured_models=[
+                    self.config.llm.default_model,
+                    self.config.llm.fallback_model,
+                    self.config.llm.cheap_model,
+                ],
+            )
+        else:
+            logger.info("llm_provider_ready", available_models=available)
+
     def _check_killswitch(self) -> None:
         """KillSwitch 체크 → 발동 시 KillSwitchError raise"""
         allowed, reason = self.cost_tracker.check_limits(self.config)
@@ -186,6 +212,7 @@ class LLMProvider:
             litellm response object
 
         Raises:
+            NoAPIKeyError: 체인 내 모든 모델의 API 키 미설정
             LLMAllProvidersExhaustedError: 모든 모델 실패
         """
         if explicit_model:
@@ -202,6 +229,23 @@ class LLMProvider:
             if m not in seen:
                 seen.add(m)
                 unique_chain.append(m)
+
+        # 키 없는 모델 사전 감지: 체인 내 모든 모델이 키 미설정이면 즉시 실패
+        models_without_keys = [
+            m for m in unique_chain
+            if not self.config.has_api_key_for_model(m)
+        ]
+        if len(models_without_keys) == len(unique_chain):
+            # 모든 모델이 키 미설정 → API 호출 시도 없이 명확한 에러
+            missing_info = self.config.get_missing_key_models()
+            if missing_info:
+                model, env_var = missing_info[0]
+                raise NoAPIKeyError(model=model, env_var=env_var)
+            # fallback: get_missing_key_models가 빈 경우 (매핑에 없는 모델)
+            raise NoAPIKeyError(model=unique_chain[0], env_var="UNKNOWN_KEY")
+
+        # 키 있는 모델을 우선 시도하도록 정렬 (키 없는 모델은 뒤로)
+        unique_chain.sort(key=lambda m: 0 if self.config.has_api_key_for_model(m) else 1)
 
         attempts: list[dict] = []
 

@@ -2,15 +2,30 @@
 
 pydantic-settings 기반 환경변수 관리
 모든 설정은 .env 파일 또는 환경변수에서 로드
+
+테스트 시 .env 파일 격리:
+    ARIA_ENV_FILE="" pytest tests/ -v
 """
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 from functools import lru_cache
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _get_env_file() -> str | None:
+    """환경변수 ARIA_ENV_FILE로 .env 파일 경로 결정
+
+    - 미설정: ".env" (기본값)
+    - 빈 문자열: None (.env 파일 읽지 않음 — 테스트 격리용)
+    - 경로 지정: 해당 경로 사용
+    """
+    val = os.environ.get("ARIA_ENV_FILE", ".env")
+    return val or None
 
 
 class Environment(str, Enum):
@@ -22,11 +37,11 @@ class Environment(str, Enum):
 class LLMConfig(BaseSettings):
     """LLM Provider 설정"""
 
-    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=_get_env_file(), extra="ignore")
 
     default_model: str = Field(default="claude-sonnet-4-20250514", description="기본 LLM 모델")
-    fallback_model: str = Field(default="gpt-4o", description="장애 시 대체 모델")
-    cheap_model: str = Field(default="deepseek/deepseek-chat", description="저비용 작업용 모델")
+    fallback_model: str = Field(default="claude-sonnet-4-20250514", description="장애 시 대체 모델")
+    cheap_model: str = Field(default="claude-haiku-4-5-20251001", description="저비용 작업용 모델")
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", description="로컬 임베딩 모델")
     max_tokens_per_request: int = Field(default=4096, description="요청당 최대 토큰")
 
@@ -34,7 +49,7 @@ class LLMConfig(BaseSettings):
 class QdrantConfig(BaseSettings):
     """Qdrant Vector DB 설정"""
 
-    model_config = SettingsConfigDict(env_prefix="QDRANT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="QDRANT_", env_file=_get_env_file(), extra="ignore")
 
     host: str = Field(default="localhost")
     port: int = Field(default=6333)
@@ -45,7 +60,7 @@ class QdrantConfig(BaseSettings):
 class CostControlConfig(BaseSettings):
     """비용 제어 (KillSwitch) 설정"""
 
-    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=_get_env_file(), extra="ignore")
 
     daily_cost_limit_usd: float = Field(default=10.0, description="일일 API 비용 상한 (USD)")
     monthly_cost_limit_usd: float = Field(default=300.0, description="월간 API 비용 상한 (USD)")
@@ -54,7 +69,7 @@ class CostControlConfig(BaseSettings):
 class APIConfig(BaseSettings):
     """FastAPI 서버 설정"""
 
-    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ARIA_", env_file=_get_env_file(), extra="ignore")
 
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8100)
@@ -87,7 +102,7 @@ class APIConfig(BaseSettings):
 class AriaConfig(BaseSettings):
     """ARIA 통합 설정"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_get_env_file(), extra="ignore")
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
@@ -99,6 +114,58 @@ class AriaConfig(BaseSettings):
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
+
+    # 모델 prefix → API 키 필드 매핑
+    _MODEL_KEY_MAP: dict[str, str] = {
+        "claude": "anthropic_api_key",
+        "anthropic": "anthropic_api_key",
+        "gpt": "openai_api_key",
+        "o1": "openai_api_key",
+        "o3": "openai_api_key",
+        "openai": "openai_api_key",
+        "gemini": "google_api_key",
+        "deepseek": "deepseek_api_key",
+    }
+
+    def get_api_key_for_model(self, model: str) -> str:
+        """모델명에 대응하는 API 키 반환 (빈 문자열이면 미설정)"""
+        model_lower = model.lower()
+        for prefix, key_field in self._MODEL_KEY_MAP.items():
+            if prefix in model_lower:
+                return getattr(self, key_field, "")
+        return ""
+
+    def has_api_key_for_model(self, model: str) -> bool:
+        """해당 모델의 API 키가 설정되어 있는지 확인"""
+        return bool(self.get_api_key_for_model(model))
+
+    def get_available_models(self) -> list[str]:
+        """API 키가 설정된 모델 목록 반환"""
+        all_models = [
+            self.llm.default_model,
+            self.llm.fallback_model,
+            self.llm.cheap_model,
+        ]
+        return [m for m in all_models if self.has_api_key_for_model(m)]
+
+    def get_missing_key_models(self) -> list[tuple[str, str]]:
+        """API 키가 없는 모델과 필요한 환경변수명 반환 → [(model, env_var), ...]"""
+        _KEY_FIELD_TO_ENV: dict[str, str] = {
+            "anthropic_api_key": "ANTHROPIC_API_KEY",
+            "openai_api_key": "OPENAI_API_KEY",
+            "google_api_key": "GOOGLE_API_KEY",
+            "deepseek_api_key": "DEEPSEEK_API_KEY",
+        }
+        missing: list[tuple[str, str]] = []
+        for model in {self.llm.default_model, self.llm.fallback_model, self.llm.cheap_model}:
+            model_lower = model.lower()
+            for prefix, key_field in self._MODEL_KEY_MAP.items():
+                if prefix in model_lower:
+                    if not getattr(self, key_field, ""):
+                        env_var = _KEY_FIELD_TO_ENV.get(key_field, key_field.upper())
+                        missing.append((model, env_var))
+                    break
+        return missing
 
 
 @lru_cache()

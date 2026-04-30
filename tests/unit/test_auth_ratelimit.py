@@ -22,27 +22,27 @@ from aria.core.config import APIConfig, AriaConfig, Environment
 
 
 class TestAPIConfigValidator:
-    def test_development_allows_default_key(self) -> None:
+    def test_development_allows_default_key(self, clean_env) -> None:
         """development에서는 기본 키 허용"""
         config = APIConfig(env=Environment.DEVELOPMENT)
         assert config.api_key == "aria-dev-key-change-me"
 
-    def test_development_allows_auth_disabled(self) -> None:
+    def test_development_allows_auth_disabled(self, clean_env) -> None:
         """development에서는 auth_disabled 허용"""
         config = APIConfig(env=Environment.DEVELOPMENT, auth_disabled=True)
         assert config.auth_disabled is True
 
-    def test_production_rejects_default_key(self) -> None:
+    def test_production_rejects_default_key(self, clean_env) -> None:
         """production에서 기본 키 사용 시 ValueError"""
         with pytest.raises(ValueError, match="기본 API 키"):
             APIConfig(env=Environment.PRODUCTION)
 
-    def test_staging_rejects_default_key(self) -> None:
+    def test_staging_rejects_default_key(self, clean_env) -> None:
         """staging에서 기본 키 사용 시 ValueError"""
         with pytest.raises(ValueError, match="기본 API 키"):
             APIConfig(env=Environment.STAGING)
 
-    def test_production_rejects_auth_disabled(self) -> None:
+    def test_production_rejects_auth_disabled(self, clean_env) -> None:
         """production에서 auth_disabled=true 시 ValueError"""
         with pytest.raises(ValueError, match="ARIA_AUTH_DISABLED"):
             APIConfig(
@@ -51,7 +51,7 @@ class TestAPIConfigValidator:
                 auth_disabled=True,
             )
 
-    def test_production_accepts_custom_key(self) -> None:
+    def test_production_accepts_custom_key(self, clean_env) -> None:
         """production에서 커스텀 키 + auth 활성화 시 정상"""
         config = APIConfig(
             env=Environment.PRODUCTION,
@@ -60,12 +60,12 @@ class TestAPIConfigValidator:
         assert config.api_key == "real-production-key-12345"
         assert config.auth_disabled is False
 
-    def test_default_auth_disabled_is_false(self) -> None:
+    def test_default_auth_disabled_is_false(self, clean_env) -> None:
         """auth_disabled 기본값은 False"""
         config = APIConfig()
         assert config.auth_disabled is False
 
-    def test_rate_limit_burst_default(self) -> None:
+    def test_rate_limit_burst_default(self, clean_env) -> None:
         """rate_limit_burst 기본값 확인"""
         config = APIConfig()
         assert config.rate_limit_burst == 10
@@ -129,7 +129,6 @@ class TestAuthEndpoints:
             cfg.api.env = Environment.DEVELOPMENT
             mock_config.return_value = cfg
 
-            # rate_limiter도 mock
             with patch("aria.api.app.rate_limiter") as mock_rl:
                 mock_rl.is_allowed.return_value = True
 
@@ -138,7 +137,6 @@ class TestAuthEndpoints:
                     json={"query": "테스트"},
                     headers={"X-API-Key": "correct-key-12345"},
                 )
-                # 인증 통과 → 에이전트 미초기화 503 (정상)
                 assert response.status_code == 503
 
     def test_query_with_auth_disabled_skips_key_check(self, client) -> None:
@@ -155,9 +153,7 @@ class TestAuthEndpoints:
                 response = client.post(
                     "/v1/query",
                     json={"query": "테스트"},
-                    # X-API-Key 헤더 없음
                 )
-                # 인증 스킵 → 에이전트 미초기화 503
                 assert response.status_code == 503
 
     def test_rate_limit_applied_even_with_auth_disabled(self, client) -> None:
@@ -169,7 +165,7 @@ class TestAuthEndpoints:
             mock_config.return_value = cfg
 
             with patch("aria.api.app.rate_limiter") as mock_rl:
-                mock_rl.is_allowed.return_value = False  # rate limit 초과
+                mock_rl.is_allowed.return_value = False
 
                 response = client.post(
                     "/v1/query",
@@ -197,10 +193,8 @@ class TestRateLimiterConfig:
 
         limiter = RateLimiter(max_requests=2, window_seconds=60)
 
-        # 서로 다른 IP는 별도 bucket
         assert limiter.is_allowed("anon:192.168.1.1") is True
         assert limiter.is_allowed("anon:192.168.1.1") is True
         assert limiter.is_allowed("anon:192.168.1.1") is False
 
-        # 다른 IP는 별도
         assert limiter.is_allowed("anon:192.168.1.2") is True

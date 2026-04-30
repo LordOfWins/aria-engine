@@ -83,3 +83,15 @@ class AgentError(AriaError):
             code="AGENT_ERROR",
             details={"query": query[:200], "iteration": iteration},
         )
+
+
+class NoAPIKeyError(AriaError):
+    """LLM 호출에 필요한 API 키 미설정"""
+
+    def __init__(self, model: str, env_var: str) -> None:
+        super().__init__(
+            f"'{model}' 호출에 필요한 API 키가 설정되지 않았습니다. "
+            f".env 파일에 {env_var}를 설정하세요.",
+            code="NO_API_KEY",
+            details={"model": model, "required_env_var": env_var},
+        )

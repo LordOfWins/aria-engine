@@ -22,6 +22,7 @@ from aria.core.exceptions import (
     KillSwitchError,
     LLMAllProvidersExhaustedError,
     LLMProviderError,
+    NoAPIKeyError,
     CollectionNotFoundError,
     VectorStoreError,
     AgentError,
@@ -75,6 +76,7 @@ class TestCustomExceptions:
         assert issubclass(VectorStoreError, AriaError)
         assert issubclass(CollectionNotFoundError, VectorStoreError)
         assert issubclass(AgentError, AriaError)
+        assert issubclass(NoAPIKeyError, AriaError)
 
 
 # === 2. JSON Safe Parser Tests ===
