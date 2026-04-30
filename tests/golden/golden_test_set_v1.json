@@ -1,0 +1,298 @@
+{
+  "version": "1.0.0",
+  "created_at": "2026-05-01",
+  "description": "ARIA Engine Golden Test Set - 심리학 도메인 30문항. 검색 품질 baseline 측정 + 회귀 방지용",
+  "domains": ["attachment", "relationship", "therapy", "personality", "emotion"],
+  "evaluation_criteria": {
+    "retrieval_relevance": "검색된 문서가 질문과 관련 있는가 (0.0~1.0)",
+    "answer_accuracy": "답변이 정확한 전문 지식을 포함하는가 (0.0~1.0)",
+    "answer_completeness": "핵심 포인트를 빠뜨리지 않았는가 (0.0~1.0)"
+  },
+  "test_cases": [
+    {
+      "id": "GT-001",
+      "domain": "attachment",
+      "difficulty": "easy",
+      "query": "회피형 애착 스타일이란 무엇인가요?",
+      "expected_keywords": ["거리두기", "독립", "친밀감 회피", "감정 억제"],
+      "expected_answer_contains": "친밀한 관계에서 정서적 거리를 유지하려는 경향",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-002",
+      "domain": "attachment",
+      "difficulty": "easy",
+      "query": "불안형 애착의 특징은?",
+      "expected_keywords": ["집착", "버림받음", "불안", "과도한 걱정"],
+      "expected_answer_contains": "관계에서 과도한 걱정과 집착",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-003",
+      "domain": "attachment",
+      "difficulty": "easy",
+      "query": "안전형 애착은 어떤 특성을 가지나요?",
+      "expected_keywords": ["신뢰", "안정", "건강한 관계", "자율성"],
+      "expected_answer_contains": "건강한 관계 형성의 기초",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-004",
+      "domain": "attachment",
+      "difficulty": "moderate",
+      "query": "혼란형 애착이 대인관계에 미치는 영향은?",
+      "expected_keywords": ["접근-회피", "혼란", "두려움", "불일치"],
+      "expected_answer_contains": "접근과 회피를 동시에",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-005",
+      "domain": "attachment",
+      "difficulty": "moderate",
+      "query": "애착 스타일은 어떻게 형성되나요?",
+      "expected_keywords": ["양육자", "초기 경험", "영아기", "내적 작동 모델"],
+      "expected_answer_contains": "영아기 양육자와의 관계",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-006",
+      "domain": "attachment",
+      "difficulty": "hard",
+      "query": "회피형 애착을 가진 사람과 불안형 애착을 가진 사람이 연애하면 어떤 역동이 발생하나요?",
+      "expected_keywords": ["추격-도주", "악순환", "거리두기", "매달림"],
+      "expected_answer_contains": "추격-도주 패턴",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-007",
+      "domain": "relationship",
+      "difficulty": "easy",
+      "query": "건강한 의사소통 방법에는 어떤 것들이 있나요?",
+      "expected_keywords": ["나 전달법", "경청", "비폭력 대화", "공감"],
+      "expected_answer_contains": "나 전달법",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-008",
+      "domain": "relationship",
+      "difficulty": "easy",
+      "query": "가스라이팅이란 무엇인가요?",
+      "expected_keywords": ["심리적 조작", "현실 왜곡", "자존감", "의심"],
+      "expected_answer_contains": "상대방의 현실 인식을 왜곡",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-009",
+      "domain": "relationship",
+      "difficulty": "moderate",
+      "query": "연인 관계에서 갈등을 건강하게 해결하는 방법은?",
+      "expected_keywords": ["타임아웃", "경청", "타협", "감정 표현"],
+      "expected_answer_contains": "감정을 인정하고",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-010",
+      "domain": "relationship",
+      "difficulty": "moderate",
+      "query": "공동의존 관계란 무엇이며 어떻게 벗어날 수 있나요?",
+      "expected_keywords": ["경계", "자기돌봄", "과도한 책임", "정체성"],
+      "expected_answer_contains": "건강한 경계 설정",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-011",
+      "domain": "relationship",
+      "difficulty": "hard",
+      "query": "이별 후 미련이 오래가는 심리적 원인은 무엇인가요?",
+      "expected_keywords": ["미완결 감정", "애착", "이상화", "상실"],
+      "expected_answer_contains": "미완결",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-012",
+      "domain": "relationship",
+      "difficulty": "hard",
+      "query": "직장 상사와의 갈등에서 번아웃으로 이어지는 과정을 설명해주세요",
+      "expected_keywords": ["스트레스", "무력감", "탈진", "자기효능감"],
+      "expected_answer_contains": "만성적 스트레스",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-013",
+      "domain": "therapy",
+      "difficulty": "easy",
+      "query": "인지행동치료(CBT)란 무엇인가요?",
+      "expected_keywords": ["인지", "행동", "사고 패턴", "왜곡"],
+      "expected_answer_contains": "사고 패턴을 변화",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-014",
+      "domain": "therapy",
+      "difficulty": "easy",
+      "query": "상담과 심리치료의 차이는 무엇인가요?",
+      "expected_keywords": ["일상 문제", "심층적", "전문가", "기간"],
+      "expected_answer_contains": "심층적",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-015",
+      "domain": "therapy",
+      "difficulty": "moderate",
+      "query": "노출 치료는 어떤 원리로 작동하나요?",
+      "expected_keywords": ["불안", "점진적", "습관화", "회피 감소"],
+      "expected_answer_contains": "불안 자극에 반복",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-016",
+      "domain": "therapy",
+      "difficulty": "moderate",
+      "query": "마음챙김 명상이 정신건강에 미치는 효과는?",
+      "expected_keywords": ["현재 순간", "비판단", "스트레스", "뇌 구조"],
+      "expected_answer_contains": "현재 순간에 집중",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-017",
+      "domain": "therapy",
+      "difficulty": "hard",
+      "query": "변증법적 행동치료(DBT)와 인지행동치료(CBT)의 핵심 차이점은?",
+      "expected_keywords": ["감정 조절", "수용", "변화", "경계선 성격"],
+      "expected_answer_contains": "수용과 변화의 균형",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-018",
+      "domain": "therapy",
+      "difficulty": "hard",
+      "query": "EMDR 치료는 트라우마에 어떻게 작용하나요?",
+      "expected_keywords": ["안구운동", "기억 재처리", "PTSD", "양측성 자극"],
+      "expected_answer_contains": "안구운동",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-019",
+      "domain": "personality",
+      "difficulty": "easy",
+      "query": "내향적인 사람과 외향적인 사람의 차이는?",
+      "expected_keywords": ["에너지", "사회적 자극", "혼자만의 시간", "사교"],
+      "expected_answer_contains": "에너지를 충전하는 방식",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-020",
+      "domain": "personality",
+      "difficulty": "easy",
+      "query": "자존감이란 무엇인가요?",
+      "expected_keywords": ["자기 가치", "긍정적 평가", "자신감", "자기 수용"],
+      "expected_answer_contains": "자기 자신에 대한 주관적 가치 평가",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-021",
+      "domain": "personality",
+      "difficulty": "moderate",
+      "query": "나르시시즘과 건강한 자존감의 차이는?",
+      "expected_keywords": ["과대 자기상", "공감 부족", "취약성", "타인 평가"],
+      "expected_answer_contains": "과대한 자기상",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-022",
+      "domain": "personality",
+      "difficulty": "moderate",
+      "query": "완벽주의가 정신건강에 미치는 부정적 영향은?",
+      "expected_keywords": ["불안", "미루기", "자기비판", "번아웃"],
+      "expected_answer_contains": "자기비판",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-023",
+      "domain": "personality",
+      "difficulty": "hard",
+      "query": "Big Five 성격 모델에서 신경증 점수가 높은 사람의 대인관계 특성은?",
+      "expected_keywords": ["정서 불안정", "과민", "갈등", "스트레스 취약"],
+      "expected_answer_contains": "정서적 불안정",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-024",
+      "domain": "personality",
+      "difficulty": "hard",
+      "query": "어둠의 3요소(Dark Triad)는 무엇이며 각각의 특징은?",
+      "expected_keywords": ["나르시시즘", "마키아벨리즘", "사이코패시", "조작"],
+      "expected_answer_contains": "나르시시즘과 마키아벨리즘과 사이코패시",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-025",
+      "domain": "emotion",
+      "difficulty": "easy",
+      "query": "감정 조절이란 무엇인가요?",
+      "expected_keywords": ["감정 인식", "조절 전략", "표현", "억제"],
+      "expected_answer_contains": "감정을 인식하고 조절",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-026",
+      "domain": "emotion",
+      "difficulty": "easy",
+      "query": "분노를 건강하게 표현하는 방법은?",
+      "expected_keywords": ["나 전달법", "깊은 호흡", "타임아웃", "원인 파악"],
+      "expected_answer_contains": "자신의 감정을 표현",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-027",
+      "domain": "emotion",
+      "difficulty": "moderate",
+      "query": "감정 노동이 직장인에게 미치는 영향은?",
+      "expected_keywords": ["표면 행위", "내면 행위", "소진", "이직"],
+      "expected_answer_contains": "감정을 억제하거나 위장",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-028",
+      "domain": "emotion",
+      "difficulty": "moderate",
+      "query": "불안과 걱정의 차이는 무엇인가요?",
+      "expected_keywords": ["신체 반응", "인지적", "미래", "현재 위협"],
+      "expected_answer_contains": "불안은 신체적",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-029",
+      "domain": "emotion",
+      "difficulty": "hard",
+      "query": "알렉시시미아(감정인식불능증)란 무엇이며 어떤 문제를 유발하나요?",
+      "expected_keywords": ["감정 인식 어려움", "신체화", "대인관계", "표현 제한"],
+      "expected_answer_contains": "자신의 감정을 인식하거나 표현하는 데 어려움",
+      "collection": "psychology_kb"
+    },
+    {
+      "id": "GT-030",
+      "domain": "emotion",
+      "difficulty": "hard",
+      "query": "정서적 방임이 성인기 감정 조절 능력에 미치는 장기적 영향은?",
+      "expected_keywords": ["감정 무감각", "자기조절 결함", "내면화 장애", "애착"],
+      "expected_answer_contains": "감정 조절 능력의 발달에 부정적",
+      "collection": "psychology_kb"
+    }
+  ],
+  "statistics": {
+    "total": 30,
+    "by_domain": {
+      "attachment": 6,
+      "relationship": 6,
+      "therapy": 6,
+      "personality": 6,
+      "emotion": 6
+    },
+    "by_difficulty": {
+      "easy": 12,
+      "moderate": 10,
+      "hard": 8
+    }
+  }
+}

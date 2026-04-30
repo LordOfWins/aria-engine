@@ -234,12 +234,18 @@ class TestFastAPIErrorHandlers:
 
     def test_query_without_agent_returns_503(self, client) -> None:  # type: ignore[no-untyped-def]
         """에이전트 미초기화 상태에서 query 호출 → 503"""
-        response = client.post(
-            "/v1/query",
-            json={"query": "테스트 질문"},
-            headers=self._AUTH_HEADER,
-        )
-        assert response.status_code == 503
+        import aria.api.app as app_module
+        original = app_module.react_agent
+        app_module.react_agent = None
+        try:
+            response = client.post(
+                "/v1/query",
+                json={"query": "테스트 질문"},
+                headers=self._AUTH_HEADER,
+            )
+            assert response.status_code == 503
+        finally:
+            app_module.react_agent = original
 
     def test_empty_query_returns_422(self, client) -> None:  # type: ignore[no-untyped-def]
         """빈 쿼리 → Pydantic validation error"""
@@ -251,9 +257,15 @@ class TestFastAPIErrorHandlers:
         assert response.status_code == 422
 
     def test_search_without_vector_store_returns_503(self, client) -> None:  # type: ignore[no-untyped-def]
-        response = client.post(
-            "/v1/knowledge/test_col/search",
-            json={"query": "테스트"},
-            headers=self._AUTH_HEADER,
-        )
-        assert response.status_code == 503
+        import aria.api.app as app_module
+        original = app_module.vector_store
+        app_module.vector_store = None  # 명시적으로 None 설정
+        try:
+            response = client.post(
+                "/v1/knowledge/test_col/search",
+                json={"query": "테스트"},
+                headers=self._AUTH_HEADER,
+            )
+            assert response.status_code == 503
+        finally:
+            app_module.vector_store = original

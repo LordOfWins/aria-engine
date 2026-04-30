@@ -36,8 +36,14 @@ class VectorStore:
         results = store.search("psychology_kb", "회피형 애착 패턴", top_k=5)
     """
 
-    def __init__(self, config: AriaConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AriaConfig | None = None,
+        bm25_index: Any | None = None,
+    ) -> None:
         self.config = config or get_config()
+        # BM25 인덱스 (선택적 — Hybrid Retrieval 활성화 시 주입)
+        self._bm25_index = bm25_index
 
         # Qdrant 클라이언트 초기화
         try:
@@ -195,6 +201,24 @@ class VectorStore:
                 ) from e
 
         logger.info("documents_added", collection=collection_name, count=total_added)
+
+        # BM25 인덱스 동기화 (Hybrid Retrieval 활성화 시)
+        if self._bm25_index is not None and total_added > 0:
+            bm25_docs = [
+                {
+                    "id": self._generate_deterministic_id(doc["text"]),
+                    "text": doc["text"],
+                    "metadata": doc.get("metadata", {}),
+                }
+                for doc in documents
+            ]
+            bm25_added = self._bm25_index.add_documents(collection_name, bm25_docs)
+            logger.info(
+                "bm25_sync_completed",
+                collection=collection_name,
+                bm25_added=bm25_added,
+            )
+
         return total_added
 
     def search(
@@ -285,6 +309,10 @@ class VectorStore:
             logger.info("collection_deleted", name=collection_name)
         except Exception as e:
             raise VectorStoreError(f"컬렉션 삭제 실패: {e}", collection=collection_name) from e
+
+        # BM25 인덱스도 함께 삭제
+        if self._bm25_index is not None:
+            self._bm25_index.remove_collection(collection_name)
 
     def get_collection_info(self, collection_name: str) -> dict[str, Any]:
         """컬렉션 정보 조회

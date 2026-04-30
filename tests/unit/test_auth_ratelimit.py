@@ -122,39 +122,51 @@ class TestAuthEndpoints:
 
     def test_query_with_correct_api_key_passes_auth(self, client) -> None:
         """올바른 API 키 → 인증 통과 (에이전트 미초기화라 503)"""
-        with patch("aria.api.app.get_config") as mock_config:
-            cfg = MagicMock()
-            cfg.api.auth_disabled = False
-            cfg.api.api_key = "correct-key-12345"
-            cfg.api.env = Environment.DEVELOPMENT
-            mock_config.return_value = cfg
+        import aria.api.app as app_module
+        original = app_module.react_agent
+        app_module.react_agent = None
+        try:
+            with patch("aria.api.app.get_config") as mock_config:
+                cfg = MagicMock()
+                cfg.api.auth_disabled = False
+                cfg.api.api_key = "correct-key-12345"
+                cfg.api.env = Environment.DEVELOPMENT
+                mock_config.return_value = cfg
 
-            with patch("aria.api.app.rate_limiter") as mock_rl:
-                mock_rl.is_allowed.return_value = True
+                with patch("aria.api.app.rate_limiter") as mock_rl:
+                    mock_rl.is_allowed.return_value = True
 
-                response = client.post(
-                    "/v1/query",
-                    json={"query": "테스트"},
-                    headers={"X-API-Key": "correct-key-12345"},
-                )
-                assert response.status_code == 503
+                    response = client.post(
+                        "/v1/query",
+                        json={"query": "테스트"},
+                        headers={"X-API-Key": "correct-key-12345"},
+                    )
+                    assert response.status_code == 503
+        finally:
+            app_module.react_agent = original
 
     def test_query_with_auth_disabled_skips_key_check(self, client) -> None:
         """auth_disabled=True → API 키 없어도 인증 통과"""
-        with patch("aria.api.app.get_config") as mock_config:
-            cfg = MagicMock()
-            cfg.api.auth_disabled = True
-            cfg.api.env = Environment.DEVELOPMENT
-            mock_config.return_value = cfg
+        import aria.api.app as app_module
+        original = app_module.react_agent
+        app_module.react_agent = None
+        try:
+            with patch("aria.api.app.get_config") as mock_config:
+                cfg = MagicMock()
+                cfg.api.auth_disabled = True
+                cfg.api.env = Environment.DEVELOPMENT
+                mock_config.return_value = cfg
 
-            with patch("aria.api.app.rate_limiter") as mock_rl:
-                mock_rl.is_allowed.return_value = True
+                with patch("aria.api.app.rate_limiter") as mock_rl:
+                    mock_rl.is_allowed.return_value = True
 
-                response = client.post(
-                    "/v1/query",
-                    json={"query": "테스트"},
-                )
-                assert response.status_code == 503
+                    response = client.post(
+                        "/v1/query",
+                        json={"query": "테스트"},
+                    )
+                    assert response.status_code == 503
+        finally:
+            app_module.react_agent = original
 
     def test_rate_limit_applied_even_with_auth_disabled(self, client) -> None:
         """auth_disabled=True에서도 rate limit은 적용"""

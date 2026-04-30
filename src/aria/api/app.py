@@ -37,6 +37,8 @@ from aria.core.exceptions import (
 )
 from aria.providers.llm_provider import LLMProvider
 from aria.rag.vector_store import VectorStore
+from aria.rag.bm25_index import BM25Index
+from aria.rag.hybrid_retriever import HybridRetriever
 from aria.agents.react_agent import ReActAgent
 
 logger = structlog.get_logger()
@@ -53,9 +55,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global llm_provider, vector_store, react_agent, rate_limiter
 
     config = get_config()
+
+    # BM25 인덱스 생성 → VectorStore에 주입 (문서 추가 시 자동 동기화)
+    bm25_index = BM25Index()
     llm_provider = LLMProvider(config)
-    vector_store = VectorStore(config)
-    react_agent = ReActAgent(llm_provider, vector_store)
+    vector_store = VectorStore(config, bm25_index=bm25_index)
+
+    # Hybrid Retriever → ReAct 에이전트에 주입
+    hybrid_retriever = HybridRetriever(vector_store, bm25_index)
+    react_agent = ReActAgent(llm_provider, vector_store, hybrid_retriever=hybrid_retriever)
+
     rate_limiter = RateLimiter(
         max_requests=config.api.rate_limit_per_minute,
         window_seconds=60,
@@ -66,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         env=config.api.env.value,
         auth_disabled=config.api.auth_disabled,
         rate_limit=config.api.rate_limit_per_minute,
+        hybrid_retrieval=True,
     )
     yield
     logger.info("aria_engine_stopped")

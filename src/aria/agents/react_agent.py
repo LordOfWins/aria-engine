@@ -59,7 +59,7 @@ class AgentState:
     error: str = ""  # 에러 메시지 전달용
 
 
-INTENT_ANALYSIS_PROMPT = """당신은 사용자 의도 분석 전문가입니다.
+INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다.
 
 사용자 질문을 분석하여 다음 JSON 형태로 응답하세요:
 {{
@@ -71,16 +71,23 @@ INTENT_ANALYSIS_PROMPT = """당신은 사용자 의도 분석 전문가입니다
     "recommended_action": "search_knowledge|reason|respond|clarify"
 }}
 
-반드시 위 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요.
+반드시 위 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요."""
 
-사용자 질문: {query}"""
+INTENT_ANALYSIS_USER = """사용자 질문: {query}"""
 
 
-REASONING_PROMPT = """당신은 논리적 추론 전문가입니다.
+REASONING_SYSTEM = """당신은 논리적 추론 전문가입니다.
 
 주어진 정보를 바탕으로 단계적으로 사고하여 답변을 도출하세요.
 
-## 사용자 질문
+다음 형식으로 응답하세요:
+1. 현재까지 알고 있는 것을 정리
+2. 부족한 정보가 있다면 무엇인지
+3. 논리적 추론 과정
+4. 결론 및 답변
+5. 확신도 (0.0 ~ 1.0)"""
+
+REASONING_USER = """## 사용자 질문
 {query}
 
 ## 의도 분석
@@ -90,28 +97,10 @@ REASONING_PROMPT = """당신은 논리적 추론 전문가입니다.
 {search_results}
 
 ## 이전 추론 단계
-{previous_reasoning}
-
-다음 형식으로 응답하세요:
-1. 현재까지 알고 있는 것을 정리
-2. 부족한 정보가 있다면 무엇인지
-3. 논리적 추론 과정
-4. 결론 및 답변
-5. 확신도 (0.0 ~ 1.0)"""
+{previous_reasoning}"""
 
 
-SELF_REFLECTION_PROMPT = """당신은 답변 품질 평가 전문가입니다.
-
-다음 답변의 품질을 평가하세요:
-
-## 원래 질문
-{query}
-
-## 사용자의 실제 의도
-{intent}
-
-## 현재 답변
-{answer}
+SELF_REFLECTION_SYSTEM = """당신은 답변 품질 평가 전문가입니다.
 
 평가 기준:
 1. 질문에 대한 직접적 답변인가?
@@ -126,6 +115,15 @@ SELF_REFLECTION_PROMPT = """당신은 답변 품질 평가 전문가입니다.
     "should_retry": true/false,
     "improvement_suggestion": "개선 방향"
 }}"""
+
+SELF_REFLECTION_USER = """## 원래 질문
+{query}
+
+## 사용자의 실제 의도
+{intent}
+
+## 현재 답변
+{answer}"""
 
 
 def _safe_parse_json(content: str) -> dict[str, Any] | None:
@@ -177,15 +175,20 @@ class ReActAgent:
     사용법:
         agent = ReActAgent(llm_provider, vector_store)
         result = await agent.run("회피형 애착 패턴에 대해 설명해줘", collection="psychology_kb")
+
+    Hybrid Retrieval 사용:
+        agent = ReActAgent(llm_provider, vector_store, hybrid_retriever=retriever)
     """
 
     def __init__(
         self,
         llm: LLMProvider,
         vector_store: VectorStore,
+        hybrid_retriever: Any | None = None,
     ) -> None:
         self.llm = llm
         self.vector_store = vector_store
+        self.hybrid_retriever = hybrid_retriever
         self._graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -226,11 +229,13 @@ class ReActAgent:
 
     async def _analyze_intent(self, state: AgentState) -> dict[str, Any]:
         """Step 1: 사용자 의도 분석"""
-        prompt = INTENT_ANALYSIS_PROMPT.format(query=state.query)
+        user_prompt = INTENT_ANALYSIS_USER.format(query=state.query)
 
         try:
             result = await self.llm.complete(
-                prompt,
+                user_prompt,
+                system_prompt=INTENT_ANALYSIS_SYSTEM,
+                cache_system_prompt=True,  # Prompt Caching — 반복 시스템 프롬프트 캐싱
                 model_tier="cheap",  # 의도 분석은 저비용 모델로 충분
                 temperature=0.3,
             )
@@ -281,7 +286,11 @@ class ReActAgent:
         return "search_knowledge"
 
     async def _search_knowledge(self, state: AgentState) -> dict[str, Any]:
-        """Step 2: 지식 검색 (RAG)"""
+        """Step 2: 지식 검색 (RAG — Hybrid Retrieval 지원)
+
+        hybrid_retriever가 설정되면: 벡터 + BM25 → RRF 병합
+        미설정이면: 기존 벡터 검색만 사용 (하위 호환)
+        """
         # 이미 검색 결과가 있으면 재검색 안 함 (retry 루프 시)
         if state.search_results and state.iteration > 0:
             logger.debug("search_skipped", reason="already_has_results_in_retry")
@@ -290,14 +299,22 @@ class ReActAgent:
         queries = state.intent.get("search_queries", [state.query])
         all_results: list[dict[str, Any]] = []
         collection = state.collection  # state에서 컬렉션 참조 (race condition 방지)
+        use_hybrid = self.hybrid_retriever is not None
 
         for query in queries[:3]:  # 최대 3개 쿼리
             try:
-                results = self.vector_store.search(
-                    collection_name=collection,
-                    query=query,
-                    top_k=3,
-                )
+                if use_hybrid:
+                    results = self.hybrid_retriever.search(
+                        collection_name=collection,
+                        query=query,
+                        top_k=5,
+                    )
+                else:
+                    results = self.vector_store.search(
+                        collection_name=collection,
+                        query=query,
+                        top_k=3,
+                    )
                 all_results.extend(results)
             except CollectionNotFoundError:
                 logger.warning("collection_not_found", collection=collection, query=query)
@@ -327,7 +344,7 @@ class ReActAgent:
 
         previous = "\n".join(state.reasoning_steps) if state.reasoning_steps else "첫 번째 추론 단계"
 
-        prompt = REASONING_PROMPT.format(
+        user_prompt = REASONING_USER.format(
             query=state.query,
             intent=str(state.intent),
             search_results=search_context,
@@ -336,7 +353,9 @@ class ReActAgent:
 
         try:
             result = await self.llm.complete(
-                prompt,
+                user_prompt,
+                system_prompt=REASONING_SYSTEM,
+                cache_system_prompt=True,  # Prompt Caching — 추론 시스템 프롬프트 캐싱
                 model_tier="default",
                 temperature=0.5,
             )
@@ -365,7 +384,7 @@ class ReActAgent:
             logger.info("self_reflect_skipped", reason="max_iterations_reached")
             return {"confidence": 0.6, "should_stop": True}
 
-        prompt = SELF_REFLECTION_PROMPT.format(
+        user_prompt = SELF_REFLECTION_USER.format(
             query=state.query,
             intent=str(state.intent),
             answer=state.current_answer[:2000],  # 너무 긴 답변은 잘라서 평가
@@ -373,7 +392,9 @@ class ReActAgent:
 
         try:
             result = await self.llm.complete(
-                prompt,
+                user_prompt,
+                system_prompt=SELF_REFLECTION_SYSTEM,
+                cache_system_prompt=True,  # Prompt Caching — 성찰 시스템 프롬프트 캐싱
                 model_tier="cheap",
                 temperature=0.2,
             )
