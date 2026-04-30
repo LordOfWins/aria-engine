@@ -211,6 +211,12 @@ class TestLLMProviderFallback:
 # === 5. FastAPI Error Handler Tests ===
 
 class TestFastAPIErrorHandlers:
+    """API 키 인증 활성화 상태에서의 에러 핸들러 테스트"""
+
+    # 기본 개발 키 (config 기본값)
+    _DEFAULT_KEY = "aria-dev-key-change-me"
+    _AUTH_HEADER = {"X-API-Key": _DEFAULT_KEY}
+
     @pytest.fixture
     def client(self):  # type: ignore[no-untyped-def]
         from fastapi.testclient import TestClient
@@ -229,6 +235,7 @@ class TestFastAPIErrorHandlers:
         response = client.post(
             "/v1/query",
             json={"query": "테스트 질문"},
+            headers=self._AUTH_HEADER,
         )
         assert response.status_code == 503
 
@@ -237,6 +244,7 @@ class TestFastAPIErrorHandlers:
         response = client.post(
             "/v1/query",
             json={"query": ""},
+            headers=self._AUTH_HEADER,
         )
         assert response.status_code == 422
 
@@ -244,5 +252,6 @@ class TestFastAPIErrorHandlers:
         response = client.post(
             "/v1/knowledge/test_col/search",
             json={"query": "테스트"},
+            headers=self._AUTH_HEADER,
         )
         assert response.status_code == 503

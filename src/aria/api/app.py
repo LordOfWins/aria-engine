@@ -49,14 +49,23 @@ react_agent: ReActAgent | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 시작/종료 시 초기화"""
-    global llm_provider, vector_store, react_agent
+    global llm_provider, vector_store, react_agent, rate_limiter
 
     config = get_config()
     llm_provider = LLMProvider(config)
     vector_store = VectorStore(config)
     react_agent = ReActAgent(llm_provider, vector_store)
+    rate_limiter = RateLimiter(
+        max_requests=config.api.rate_limit_per_minute,
+        window_seconds=60,
+    )
 
-    logger.info("aria_engine_started", env=config.api.env.value)
+    logger.info(
+        "aria_engine_started",
+        env=config.api.env.value,
+        auth_disabled=config.api.auth_disabled,
+        rate_limit=config.api.rate_limit_per_minute,
+    )
     yield
     logger.info("aria_engine_stopped")
 
@@ -94,7 +103,7 @@ class RateLimiter:
         return True
 
 
-rate_limiter = RateLimiter(max_requests=60, window_seconds=60)
+rate_limiter: RateLimiter | None = None  # lifespan에서 config 기반 초기화
 
 
 # === CORS ===
@@ -206,19 +215,45 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 async def verify_api_key(request: Request, api_key: str | None = Security(api_key_header)) -> str:
-    config = get_config()
-    if config.api.env.value == "development":
-        client_id = "dev"
-    else:
-        if not api_key or api_key != config.api.api_key:
-            raise HTTPException(status_code=401, detail="Invalid API key")
-        client_id = api_key[:8]  # API 키 앞 8자를 client_id로 사용
+    """API 키 검증 + Rate Limit 체크
 
-    # Rate limit 체크
-    if not rate_limiter.is_allowed(client_id):
+    인증 우회 조건: ARIA_AUTH_DISABLED=true (development 환경에서만 허용)
+    production/staging에서는 config validator가 auth_disabled=true를 차단함
+    """
+    config = get_config()
+
+    if config.api.auth_disabled:
+        # 명시적 스킵 — IP 기반 client_id (rate limit은 여전히 적용)
+        client_ip = request.client.host if request.client else "unknown"
+        client_id = f"anon:{client_ip}"
+        logger.debug("auth_skipped", client_id=client_id, reason="auth_disabled")
+    else:
+        if not api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="API 키가 필요합니다. X-API-Key 헤더를 포함하세요.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+        if api_key != config.api.api_key:
+            logger.warning(
+                "auth_failed",
+                client_ip=request.client.host if request.client else "unknown",
+                api_key_prefix=api_key[:8] if len(api_key) >= 8 else "***",
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="유효하지 않은 API 키입니다.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+        client_id = f"key:{api_key[:8]}"
+
+    # Rate limit 체크 (인증 여부 무관하게 항상 적용)
+    if rate_limiter and not rate_limiter.is_allowed(client_id):
+        logger.warning("rate_limit_exceeded", client_id=client_id)
         raise HTTPException(
             status_code=429,
             detail="요청 제한을 초과했습니다. 잠시 후 다시 시도해주세요.",
+            headers={"Retry-After": "60"},
         )
 
     return client_id

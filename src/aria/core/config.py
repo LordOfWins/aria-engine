@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,7 +61,27 @@ class APIConfig(BaseSettings):
     env: Environment = Field(default=Environment.DEVELOPMENT)
     log_level: str = Field(default="INFO")
     api_key: str = Field(default="aria-dev-key-change-me", description="API 인증 키")
+    auth_disabled: bool = Field(
+        default=False,
+        description="True면 API 인증 스킵 (development 로컬 테스트용 / production에서는 무시됨)",
+    )
     rate_limit_per_minute: int = Field(default=60)
+    rate_limit_burst: int = Field(default=10, description="버스트 허용 횟수 (짧은 시간 집중 요청)")
+
+    @model_validator(mode="after")
+    def _enforce_production_auth(self) -> "APIConfig":
+        """production/staging에서는 인증 스킵 불가 + 기본 키 사용 금지"""
+        if self.env in (Environment.PRODUCTION, Environment.STAGING):
+            if self.auth_disabled:
+                raise ValueError(
+                    f"ARIA_AUTH_DISABLED=true는 {self.env.value} 환경에서 사용할 수 없습니다"
+                )
+            if self.api_key == "aria-dev-key-change-me":
+                raise ValueError(
+                    f"기본 API 키를 {self.env.value} 환경에서 사용할 수 없습니다. "
+                    "ARIA_API_KEY를 변경하세요"
+                )
+        return self
 
 
 class AriaConfig(BaseSettings):
