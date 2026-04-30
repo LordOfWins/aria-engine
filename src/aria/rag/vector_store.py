@@ -15,6 +15,7 @@ from typing import Any
 
 import structlog
 from fastembed import TextEmbedding
+from fastembed.common.model_description import ModelSource, PoolingType
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -22,6 +23,45 @@ from aria.core.config import AriaConfig, get_config
 from aria.core.exceptions import CollectionNotFoundError, VectorStoreError
 
 logger = structlog.get_logger()
+
+# FastEmbed 기본 지원 목록에 없는 다국어 모델 등록
+# intfloat/multilingual-e5-small: 384차원 / 0.47GB / 100+언어 (한국어 포함)
+# ONNX 변환 모델이 HuggingFace에 이미 있으므로 hf 소스로 등록
+_CUSTOM_MODELS: list[dict[str, Any]] = [
+    {
+        "model": "intfloat/multilingual-e5-small",
+        "pooling": PoolingType.MEAN,
+        "normalization": True,
+        "sources": ModelSource(hf="intfloat/multilingual-e5-small"),
+        "dim": 384,
+        "model_file": "onnx/model.onnx",
+    },
+    {
+        "model": "intfloat/multilingual-e5-base",
+        "pooling": PoolingType.MEAN,
+        "normalization": True,
+        "sources": ModelSource(hf="intfloat/multilingual-e5-base"),
+        "dim": 768,
+        "model_file": "onnx/model.onnx",
+    },
+]
+
+# 모듈 로드 시 한 번만 등록
+_custom_models_registered = False
+
+
+def _register_custom_models() -> None:
+    """FastEmbed에 커스텀 모델 등록 (중복 등록 방지)"""
+    global _custom_models_registered
+    if _custom_models_registered:
+        return
+
+    supported = {m["model"] for m in TextEmbedding.list_supported_models()}
+    for spec in _CUSTOM_MODELS:
+        if spec["model"] not in supported:
+            TextEmbedding.add_custom_model(**spec)
+            logger.info("custom_model_registered", model=spec["model"], dim=spec["dim"])
+    _custom_models_registered = True
 
 
 class VectorStore:
@@ -57,7 +97,14 @@ class VectorStore:
             raise VectorStoreError(f"Qdrant 연결 실패: {e}") from e
 
         # FastEmbed 로컬 임베딩 모델
-        self._embedder = TextEmbedding(model_name=self.config.llm.embedding_model)
+        _register_custom_models()
+        try:
+            self._embedder = TextEmbedding(model_name=self.config.llm.embedding_model)
+        except ValueError as e:
+            raise VectorStoreError(
+                f"임베딩 모델 '{self.config.llm.embedding_model}' 로드 실패: {e}. "
+                f"지원 모델 확인: TextEmbedding.list_supported_models()"
+            ) from e
 
         # 임베딩 차원 크기 캐시
         self._vector_size: int | None = None
