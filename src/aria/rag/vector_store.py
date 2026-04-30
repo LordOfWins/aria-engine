@@ -203,7 +203,7 @@ class VectorStore:
         query: str,
         *,
         top_k: int = 5,
-        score_threshold: float = 0.5,
+        score_threshold: float = 0.3,
         filter_conditions: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """시맨틱 검색
@@ -212,7 +212,7 @@ class VectorStore:
             collection_name: 컬렉션 이름
             query: 검색 쿼리
             top_k: 반환할 최대 결과 수
-            score_threshold: 최소 유사도 점수
+            score_threshold: 최소 유사도 점수 (paraphrase-multilingual-MiniLM: 0.3 권장)
             filter_conditions: Qdrant 필터 조건
 
         Returns:
