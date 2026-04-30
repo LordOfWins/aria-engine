@@ -102,6 +102,16 @@ class APIConfig(BaseSettings):
         return self
 
 
+class MemoryConfig(BaseSettings):
+    """3계층 메모리 시스템 설정"""
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_MEMORY_", env_file=_get_env_file(), extra="ignore")
+
+    base_path: str = Field(default="./memory", description="메모리 파일 루트 경로")
+    default_scope: str = Field(default="global", description="기본 스코프")
+    token_budget: int = Field(default=4000, ge=100, le=32000, description="In-Context 토큰 예산")
+
+
 class AriaConfig(BaseSettings):
     """ARIA 통합 설정"""
 
@@ -111,6 +121,7 @@ class AriaConfig(BaseSettings):
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     cost_control: CostControlConfig = Field(default_factory=CostControlConfig)
     api: APIConfig = Field(default_factory=APIConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     # Provider API Keys (LiteLLM이 자동 참조)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")

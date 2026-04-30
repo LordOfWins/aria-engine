@@ -1,11 +1,16 @@
 """ARIA Engine - FastAPI Application
 
 REST API 엔드포인트
-- POST /v1/query → 에이전트에게 질문
+- POST /v1/query → 에이전트에게 질문 (메모리 자동 주입)
 - POST /v1/knowledge → 지식 추가
 - POST /v1/knowledge/{collection}/search → 벡터 검색
 - GET /v1/health → 헬스 체크
 - GET /v1/cost → 비용 현황
+- GET /v1/memory/{scope}/index → 메모리 인덱스 조회
+- GET /v1/memory/{scope}/topics/{domain} → 토픽 조회
+- PUT /v1/memory/{scope}/topics/{domain} → 토픽 upsert
+- DELETE /v1/memory/{scope}/topics/{domain} → 토픽 삭제
+- POST /v1/memory/{scope}/load → 메모리 로딩 (프롬프트 마크다운)
 - 글로벌 에러 핸들러 → 구조화된 에러 응답
 - Rate limiting → 요청 제한
 """
@@ -34,12 +39,28 @@ from aria.core.exceptions import (
     CollectionNotFoundError,
     VectorStoreError,
     AgentError,
+    MemoryError as AriaMemoryError,
+    VersionConflictError,
+    MemoryNotFoundError,
+    MemoryStorageError,
+    MemoryScopeError,
 )
 from aria.providers.llm_provider import LLMProvider
 from aria.rag.vector_store import VectorStore
 from aria.rag.bm25_index import BM25Index
 from aria.rag.hybrid_retriever import HybridRetriever
 from aria.agents.react_agent import ReActAgent
+from aria.memory.file_storage import FileStorageAdapter
+from aria.memory.index_manager import IndexManager
+from aria.memory.memory_loader import MemoryLoader
+from aria.memory.types import (
+    TopicUpsertRequest,
+    TopicResponse,
+    MemoryLoadRequest,
+    MemoryLoadResponse,
+    validate_domain,
+    validate_scope,
+)
 
 logger = structlog.get_logger()
 
@@ -47,12 +68,15 @@ logger = structlog.get_logger()
 llm_provider: LLMProvider | None = None
 vector_store: VectorStore | None = None
 react_agent: ReActAgent | None = None
+index_manager: IndexManager | None = None
+memory_loader: MemoryLoader | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 시작/종료 시 초기화"""
     global llm_provider, vector_store, react_agent, rate_limiter
+    global index_manager, memory_loader
 
     config = get_config()
 
@@ -63,7 +87,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Hybrid Retriever → ReAct 에이전트에 주입
     hybrid_retriever = HybridRetriever(vector_store, bm25_index)
-    react_agent = ReActAgent(llm_provider, vector_store, hybrid_retriever=hybrid_retriever)
+
+    # Memory System 초기화
+    storage = FileStorageAdapter(config.memory.base_path)
+    index_manager = IndexManager(storage)
+    memory_loader = MemoryLoader(index_manager, config.memory.token_budget)
+
+    react_agent = ReActAgent(
+        llm_provider,
+        vector_store,
+        hybrid_retriever=hybrid_retriever,
+        memory_loader=memory_loader,
+    )
 
     rate_limiter = RateLimiter(
         max_requests=config.api.rate_limit_per_minute,
@@ -76,6 +111,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         auth_disabled=config.api.auth_disabled,
         rate_limit=config.api.rate_limit_per_minute,
         hybrid_retrieval=True,
+        memory_base_path=config.memory.base_path,
+        memory_token_budget=config.memory.token_budget,
     )
     yield
     logger.info("aria_engine_stopped")
@@ -122,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001"],  # Next.js 개발 서버
     allow_credentials=True,
-    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_methods=["POST", "GET", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["X-API-Key", "Content-Type"],
 )
 
@@ -200,6 +237,56 @@ async def no_api_key_handler(request: Request, exc: NoAPIKeyError) -> JSONRespon
             "error": exc.code,
             "message": exc.message,
             "details": exc.details,
+        },
+    )
+
+
+# === Memory Exception Handlers ===
+@app.exception_handler(VersionConflictError)
+async def version_conflict_handler(request: Request, exc: VersionConflictError) -> JSONResponse:
+    logger.warning("version_conflict_http", path=request.url.path, details=exc.details)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": exc.code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+    )
+
+
+@app.exception_handler(MemoryNotFoundError)
+async def memory_not_found_handler(request: Request, exc: MemoryNotFoundError) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": exc.code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+    )
+
+
+@app.exception_handler(MemoryScopeError)
+async def memory_scope_handler(request: Request, exc: MemoryScopeError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": exc.code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+    )
+
+
+@app.exception_handler(MemoryStorageError)
+async def memory_storage_handler(request: Request, exc: MemoryStorageError) -> JSONResponse:
+    logger.error("memory_storage_error_http", path=request.url.path, error=exc.message)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": exc.code,
+            "message": exc.message,
         },
     )
 
@@ -289,6 +376,8 @@ class QueryRequest(BaseModel):
     collection: str = Field(default="default", description="검색 대상 컬렉션")
     model_tier: str = Field(default="default", description="모델 티어: default|heavy|cheap")
     context: list[dict[str, str]] = Field(default_factory=list, description="이전 대화 이력")
+    scope: str = Field(default="global", description="메모리 스코프")
+    memory_domains: list[str] | None = Field(default=None, description="명시적 메모리 토픽 지정 (None=전체)")
 
 
 class QueryResponse(BaseModel):
@@ -298,6 +387,7 @@ class QueryResponse(BaseModel):
     reasoning_steps: list[str]
     cost_summary: dict[str, Any]
     latency_ms: float
+    memory_loaded: list[str] = Field(default_factory=list, description="로딩된 메모리 도메인")
 
 
 class DocumentInput(BaseModel):
@@ -340,7 +430,7 @@ async def query_agent(
     request: QueryRequest,
     _client_id: str = Depends(verify_api_key),
 ) -> QueryResponse:
-    """ARIA 에이전트에게 질문"""
+    """ARIA 에이전트에게 질문 (메모리 자동 주입)"""
     if react_agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
@@ -352,6 +442,8 @@ async def query_agent(
         query=request.query,
         collection=request.collection,
         context=request.context if request.context else None,
+        scope=request.scope,
+        memory_domains=request.memory_domains,
     )
 
     latency_ms = (time.time() - start_time) * 1000
@@ -363,6 +455,7 @@ async def query_agent(
         reasoning_steps=result["reasoning_steps"],
         cost_summary=result["cost_summary"],
         latency_ms=round(latency_ms, 2),
+        memory_loaded=result.get("memory_loaded", []),
     )
 
 
@@ -429,3 +522,138 @@ async def list_collections(
             for c in collections
         ]
     }
+
+
+# === Memory Endpoints ===
+
+def _require_memory() -> tuple[IndexManager, MemoryLoader]:
+    """메모리 시스템 초기화 확인"""
+    if index_manager is None or memory_loader is None:
+        raise HTTPException(status_code=503, detail="Memory system not initialized")
+    return index_manager, memory_loader
+
+
+def _validate_scope_http(scope: str) -> None:
+    """스코프 유효성 검증 (HTTP 에러로 변환)"""
+    try:
+        validate_scope(scope)
+    except ValueError:
+        raise MemoryScopeError(scope)
+
+
+def _validate_domain_http(domain: str) -> None:
+    """도메인 유효성 검증 (HTTP 에러로 변환)"""
+    try:
+        validate_domain(domain)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"유효하지 않은 도메인: {domain}")
+
+
+@app.get("/v1/memory/{scope}/index")
+async def get_memory_index(
+    scope: str,
+    _client_id: str = Depends(verify_api_key),
+) -> JSONResponse:
+    """메모리 인덱스 조회"""
+    mgr, _ = _require_memory()
+    _validate_scope_http(scope)
+    index = mgr.get_index(scope)
+    return JSONResponse(content=index.model_dump(mode="json"))
+
+
+@app.get("/v1/memory/{scope}/topics/{domain}")
+async def get_memory_topic(
+    scope: str,
+    domain: str,
+    _client_id: str = Depends(verify_api_key),
+) -> JSONResponse:
+    """토픽 조회"""
+    mgr, _ = _require_memory()
+    _validate_scope_http(scope)
+    _validate_domain_http(domain)
+    topic = mgr.get_topic(scope, domain)
+    entry = mgr.get_entry(scope, domain)
+    resp = TopicResponse(
+        domain=topic.domain,
+        scope=topic.scope,
+        summary=entry.summary if entry else "",
+        content=topic.content,
+        version=topic.version,
+        updated_at=topic.updated_at,
+        created_at=topic.created_at,
+        token_estimate=entry.token_estimate if entry else None,
+    )
+    return JSONResponse(content=resp.model_dump(mode="json"))
+
+
+@app.put("/v1/memory/{scope}/topics/{domain}")
+async def upsert_memory_topic(
+    scope: str,
+    domain: str,
+    request: TopicUpsertRequest,
+    _client_id: str = Depends(verify_api_key),
+) -> JSONResponse:
+    """토픽 upsert (read-before-write 강제)"""
+    mgr, _ = _require_memory()
+    _validate_scope_http(scope)
+    _validate_domain_http(domain)
+
+    topic = mgr.upsert_topic(
+        scope=scope,
+        domain=domain,
+        summary=request.summary,
+        content=request.content,
+        expected_version=request.expected_version,
+    )
+    entry = mgr.get_entry(scope, domain)
+    resp = TopicResponse(
+        domain=topic.domain,
+        scope=topic.scope,
+        summary=request.summary,
+        content=topic.content,
+        version=topic.version,
+        updated_at=topic.updated_at,
+        created_at=topic.created_at,
+        token_estimate=entry.token_estimate if entry else None,
+    )
+    return JSONResponse(content=resp.model_dump(mode="json"))
+
+
+@app.delete("/v1/memory/{scope}/topics/{domain}")
+async def delete_memory_topic(
+    scope: str,
+    domain: str,
+    _client_id: str = Depends(verify_api_key),
+) -> JSONResponse:
+    """토픽 + 인덱스 엔트리 삭제"""
+    mgr, _ = _require_memory()
+    _validate_scope_http(scope)
+    _validate_domain_http(domain)
+    mgr.delete_topic(scope, domain)
+    return JSONResponse(content={"status": "deleted", "scope": scope, "domain": domain})
+
+
+@app.post("/v1/memory/{scope}/load")
+async def load_memory(
+    scope: str,
+    request: MemoryLoadRequest,
+    _client_id: str = Depends(verify_api_key),
+) -> JSONResponse:
+    """메모리 로딩 → 프롬프트용 마크다운 반환"""
+    _, loader = _require_memory()
+    _validate_scope_http(scope)
+
+    result = loader.load(
+        scope=scope,
+        domains=request.domains,
+        token_budget=request.token_budget,
+    )
+
+    resp = MemoryLoadResponse(
+        scope=result.scope,
+        loaded_domains=result.loaded_domains,
+        prompt_markdown=result.prompt_markdown,
+        total_tokens=result.total_tokens,
+        budget_used=round(result.budget_used, 4),
+    )
+    return JSONResponse(content=resp.model_dump(mode="json"))

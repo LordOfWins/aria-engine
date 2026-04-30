@@ -6,6 +6,11 @@
 - LLMProviderError: LLM 호출 실패 (모든 fallback 소진)
 - VectorStoreError: 벡터DB 관련 에러
 - AgentError: 에이전트 실행 에러
+- MemoryError: 메모리 시스템 베이스 예외
+- VersionConflictError: 낙관적 락 충돌 (read-before-write 위반)
+- MemoryNotFoundError: 토픽/인덱스 미존재
+- MemoryStorageError: 파일 I/O 실패
+- MemoryScopeError: 유효하지 않은 스코프
 """
 
 from __future__ import annotations
@@ -94,4 +99,88 @@ class NoAPIKeyError(AriaError):
             f".env 파일에 {env_var}를 설정하세요.",
             code="NO_API_KEY",
             details={"model": model, "required_env_var": env_var},
+        )
+
+
+# === Memory System Exceptions ===
+
+
+class MemoryError(AriaError):
+    """메모리 시스템 베이스 예외"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "MEMORY_ERROR",
+        scope: str = "",
+        domain: str = "",
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            details={"scope": scope, "domain": domain},
+        )
+
+
+class VersionConflictError(MemoryError):
+    """낙관적 락 충돌 — read-before-write 위반
+
+    기대 버전과 실제 버전이 불일치할 때 발생
+    클라이언트는 최신 버전을 다시 읽고 재시도해야 함
+    """
+
+    def __init__(
+        self,
+        *,
+        scope: str,
+        domain: str,
+        expected_version: int,
+        actual_version: int,
+    ) -> None:
+        super().__init__(
+            f"버전 충돌: '{domain}' (scope={scope}) "
+            f"expected_version={expected_version} / actual_version={actual_version} — "
+            f"최신 버전을 읽고 재시도하세요",
+            code="VERSION_CONFLICT",
+            scope=scope,
+            domain=domain,
+        )
+        self.details["expected_version"] = expected_version
+        self.details["actual_version"] = actual_version
+
+
+class MemoryNotFoundError(MemoryError):
+    """토픽 또는 인덱스 미존재"""
+
+    def __init__(self, *, scope: str, domain: str = "") -> None:
+        target = f"토픽 '{domain}'" if domain else "인덱스"
+        super().__init__(
+            f"{target}을(를) 찾을 수 없습니다 (scope={scope})",
+            code="MEMORY_NOT_FOUND",
+            scope=scope,
+            domain=domain,
+        )
+
+
+class MemoryStorageError(MemoryError):
+    """파일 I/O 실패 (읽기/쓰기/삭제)"""
+
+    def __init__(self, message: str, *, scope: str = "", domain: str = "") -> None:
+        super().__init__(
+            message,
+            code="MEMORY_STORAGE_ERROR",
+            scope=scope,
+            domain=domain,
+        )
+
+
+class MemoryScopeError(MemoryError):
+    """유효하지 않은 스코프"""
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(
+            f"유효하지 않은 메모리 스코프: '{scope}'",
+            code="MEMORY_SCOPE_INVALID",
+            scope=scope,
         )

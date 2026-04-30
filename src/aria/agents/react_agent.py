@@ -57,6 +57,7 @@ class AgentState:
     iteration: int = 0
     should_stop: bool = False
     error: str = ""  # 에러 메시지 전달용
+    memory_context: str = ""  # 메모리 마크다운 (Layer 1 주입)
 
 
 INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다.
@@ -92,6 +93,9 @@ REASONING_USER = """## 사용자 질문
 
 ## 의도 분석
 {intent}
+
+## 메모리 컨텍스트
+{memory_context}
 
 ## 검색된 관련 정보
 {search_results}
@@ -178,6 +182,10 @@ class ReActAgent:
 
     Hybrid Retrieval 사용:
         agent = ReActAgent(llm_provider, vector_store, hybrid_retriever=retriever)
+
+    Memory 통합:
+        agent = ReActAgent(llm_provider, vector_store, memory_loader=loader)
+        result = await agent.run("...", scope="global")
     """
 
     def __init__(
@@ -185,10 +193,12 @@ class ReActAgent:
         llm: LLMProvider,
         vector_store: VectorStore,
         hybrid_retriever: Any | None = None,
+        memory_loader: Any | None = None,
     ) -> None:
         self.llm = llm
         self.vector_store = vector_store
         self.hybrid_retriever = hybrid_retriever
+        self.memory_loader = memory_loader
         self._graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -347,6 +357,7 @@ class ReActAgent:
         user_prompt = REASONING_USER.format(
             query=state.query,
             intent=str(state.intent),
+            memory_context=state.memory_context if state.memory_context else "메모리 없음",
             search_results=search_context,
             previous_reasoning=previous,
         )
@@ -453,6 +464,8 @@ class ReActAgent:
         query: str,
         collection: str = "default",
         context: list[dict[str, str]] | None = None,
+        scope: str = "global",
+        memory_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """에이전트 실행
 
@@ -460,19 +473,44 @@ class ReActAgent:
             query: 사용자 질문
             collection: 검색 대상 벡터DB 컬렉션
             context: 이전 대화 이력
+            scope: 메모리 스코프 (global/testorum/talksim/autotube)
+            memory_domains: 명시적 토픽 지정 (None이면 전체)
 
         Returns:
-            {"answer": str, "confidence": float, "reasoning_steps": list, "cost_summary": dict, ...}
+            {"answer": str, "confidence": float, "reasoning_steps": list,
+             "cost_summary": dict, "memory_loaded": list, ...}
 
         Raises:
             KillSwitchError: 비용 상한 초과
             LLMAllProvidersExhaustedError: 모든 LLM 프로바이더 실패
             AgentError: 에이전트 내부 에러
         """
+        # 메모리 로딩 (memory_loader가 설정된 경우)
+        memory_loaded: list[str] = []
+        memory_context: str = ""
+        if self.memory_loader is not None:
+            try:
+                load_result = self.memory_loader.load(
+                    scope=scope,
+                    domains=memory_domains,
+                )
+                memory_loaded = load_result.loaded_domains
+                memory_context = load_result.prompt_markdown
+                logger.info(
+                    "memory_injected",
+                    scope=scope,
+                    domains_loaded=len(memory_loaded),
+                    total_tokens=load_result.total_tokens,
+                )
+            except Exception as e:
+                # 메모리 로딩 실패해도 에이전트는 계속 동작
+                logger.warning("memory_load_failed", scope=scope, error=str(e))
+
         initial_state = AgentState(
             query=query,
             collection=collection,
             messages=context or [],
+            memory_context=memory_context,
         )
 
         try:
@@ -491,4 +529,5 @@ class ReActAgent:
             "iterations": final_state.get("iteration", 0),
             "search_results_count": len(final_state.get("search_results", [])),
             "cost_summary": self.llm.get_cost_summary(),
+            "memory_loaded": memory_loaded,
         }
