@@ -42,7 +42,10 @@ class LLMConfig(BaseSettings):
     default_model: str = Field(default="claude-sonnet-4-20250514", description="기본 LLM 모델")
     fallback_model: str = Field(default="claude-sonnet-4-20250514", description="장애 시 대체 모델")
     cheap_model: str = Field(default="claude-haiku-4-5-20251001", description="저비용 작업용 모델")
-    embedding_model: str = Field(default="intfloat/multilingual-e5-small", description="로컬 임베딩 모델 (다국어)")
+    embedding_model: str = Field(
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        description="로컬 임베딩 모델 (다국어 / FastEmbed 기본 지원)",
+    )
     max_tokens_per_request: int = Field(default=4096, description="요청당 최대 토큰")
 
 
