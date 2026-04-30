@@ -83,7 +83,7 @@ class VectorStore:
             raise VectorStoreError(f"컬렉션 목록 조회 실패: {e}", collection=collection_name) from e
 
     def ensure_collection(self, collection_name: str) -> None:
-        """컬렉션 존재 확인 → 없으면 생성"""
+        """컬렉션 존재 확인 → 없으면 생성 / 있으면 차원 호환성 검증"""
         if not self._collection_exists(collection_name):
             vector_size = self._get_vector_size()
             try:
@@ -98,6 +98,31 @@ class VectorStore:
             except Exception as e:
                 raise VectorStoreError(f"컬렉션 생성 실패: {e}", collection=collection_name) from e
         else:
+            # 기존 컬렉션의 벡터 차원이 현재 모델과 일치하는지 검증
+            try:
+                info = self._client.get_collection(collection_name)
+                existing_size = info.config.params.vectors.size  # type: ignore[union-attr]
+                current_size = self._get_vector_size()
+                if existing_size != current_size:
+                    logger.error(
+                        "vector_dimension_mismatch",
+                        collection=collection_name,
+                        existing_dim=existing_size,
+                        model_dim=current_size,
+                        model=self.config.llm.embedding_model,
+                        action="기존 컬렉션 삭제 후 재색인 필요: "
+                               f"DELETE /collections/{collection_name} → 문서 재적재",
+                    )
+                    raise VectorStoreError(
+                        f"컬렉션 '{collection_name}'의 벡터 차원({existing_size})이 "
+                        f"현재 임베딩 모델({self.config.llm.embedding_model})의 차원({current_size})과 "
+                        f"일치하지 않습니다. 컬렉션을 삭제하고 재색인하세요.",
+                        collection=collection_name,
+                    )
+            except VectorStoreError:
+                raise
+            except Exception as e:
+                logger.warning("dimension_check_skipped", collection=collection_name, error=str(e))
             logger.debug("collection_exists", name=collection_name)
 
     def add_documents(
