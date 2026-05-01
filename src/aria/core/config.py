@@ -112,6 +112,23 @@ class MemoryConfig(BaseSettings):
     token_budget: int = Field(default=4000, ge=100, le=32000, description="In-Context 토큰 예산")
 
 
+class TelegramConfig(BaseSettings):
+    """텔레그램 봇 설정"""
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_TELEGRAM_", env_file=_get_env_file(), extra="ignore")
+
+    bot_token: str = Field(default="", description="텔레그램 봇 토큰 (@BotFather에서 발급)")
+    chat_id: str = Field(default="", description="승재 전용 채팅 ID (다른 사용자 차단)")
+    aria_base_url: str = Field(
+        default="http://localhost:8100",
+        description="ARIA API 서버 주소",
+    )
+    aria_api_key: str = Field(default="", description="ARIA API 인증 키")
+    default_scope: str = Field(default="global", description="기본 메모리 스코프")
+    default_collection: str = Field(default="default", description="기본 검색 컬렉션")
+    request_timeout: int = Field(default=120, ge=10, le=300, description="ARIA API 요청 타임아웃 (초)")
+
+
 class AriaConfig(BaseSettings):
     """ARIA 통합 설정"""
 
@@ -122,6 +139,7 @@ class AriaConfig(BaseSettings):
     cost_control: CostControlConfig = Field(default_factory=CostControlConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
     # Provider API Keys (LiteLLM이 자동 참조)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
