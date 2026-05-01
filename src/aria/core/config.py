@@ -144,6 +144,18 @@ class NotionConfig(BaseSettings):
         return bool(self.token)
 
 
+class AlertConfig(BaseSettings):
+    """능동 알림 시스템 설정"""
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_ALERT_", env_file=_get_env_file(), extra="ignore")
+
+    enabled: bool = Field(default=True, description="능동 알림 활성화")
+    cost_warning_threshold: float = Field(default=0.7, ge=0.1, le=1.0, description="비용 경고 임계치 (비율)")
+    cost_critical_threshold: float = Field(default=0.9, ge=0.1, le=1.0, description="비용 긴급 임계치 (비율)")
+    confidence_threshold: float = Field(default=0.3, ge=0.0, le=1.0, description="낮은 confidence 임계치")
+    consecutive_error_threshold: int = Field(default=3, ge=1, le=20, description="연속 에러 알림 임계치")
+
+
 class EventConfig(BaseSettings):
     """이벤트 수집 시스템 설정"""
 
@@ -167,6 +179,7 @@ class AriaConfig(BaseSettings):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     notion: NotionConfig = Field(default_factory=NotionConfig)
     event: EventConfig = Field(default_factory=EventConfig)
+    alert: AlertConfig = Field(default_factory=AlertConfig)
 
     # Provider API Keys (LiteLLM이 자동 참조)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")

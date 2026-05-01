@@ -20,6 +20,7 @@ REST API 엔드포인트
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -69,6 +70,7 @@ from aria.tools.tool_registry import ToolRegistry, ToolNotFoundError
 from aria.tools.builtin import MemoryReadTool, MemoryWriteTool, KnowledgeSearchTool
 from aria.events.event_store import EventStore
 from aria.events.types import EventIngestRequest, EventIngestResponse, EventQuery
+from aria.alerts.alert_manager import AlertManager
 
 logger = structlog.get_logger()
 
@@ -80,13 +82,14 @@ index_manager: IndexManager | None = None
 memory_loader: MemoryLoader | None = None
 tool_registry: ToolRegistry | None = None
 event_store: EventStore | None = None
+alert_manager: AlertManager | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 시작/종료 시 초기화"""
     global llm_provider, vector_store, react_agent, rate_limiter
-    global index_manager, memory_loader, tool_registry, event_store
+    global index_manager, memory_loader, tool_registry, event_store, alert_manager
 
     config = get_config()
 
@@ -144,6 +147,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         retention_days=config.event.retention_days,
     )
 
+    # Alert Manager 초기화 (텔레그램 설정이 있을 때만 활성화)
+    alert_manager = AlertManager(
+        bot_token=config.telegram.bot_token,
+        chat_id=config.telegram.chat_id,
+        enabled=config.alert.enabled,
+        cost_warning_threshold=config.alert.cost_warning_threshold,
+        cost_critical_threshold=config.alert.cost_critical_threshold,
+        confidence_threshold=config.alert.confidence_threshold,
+        consecutive_error_threshold=config.alert.consecutive_error_threshold,
+    )
+
     rate_limiter = RateLimiter(
         max_requests=config.api.rate_limit_per_minute,
         window_seconds=60,
@@ -159,6 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         memory_token_budget=config.memory.token_budget,
         tools_registered=tool_registry.tool_count,
         event_store_path=config.event.base_path,
+        alerts_enabled=alert_manager.enabled,
     )
     yield
     logger.info("aria_engine_stopped")
@@ -214,6 +229,12 @@ app.add_middleware(
 @app.exception_handler(KillSwitchError)
 async def killswitch_handler(request: Request, exc: KillSwitchError) -> JSONResponse:
     logger.error("killswitch_triggered_http", path=request.url.path, details=exc.details)
+    # 능동 알림: KillSwitch 발동
+    if alert_manager:
+        asyncio.create_task(alert_manager.check_killswitch(
+            daily_cost=exc.details.get("daily_cost_usd", 0),
+            monthly_cost=exc.details.get("monthly_cost_usd", 0),
+        ))
     return JSONResponse(
         status_code=429,
         content={
@@ -264,6 +285,12 @@ async def vector_store_handler(request: Request, exc: VectorStoreError) -> JSONR
 @app.exception_handler(AgentError)
 async def agent_error_handler(request: Request, exc: AgentError) -> JSONResponse:
     logger.error("agent_error_http", path=request.url.path, error=exc.message)
+    # 능동 알림: 연속 에러 체크
+    if alert_manager:
+        asyncio.create_task(alert_manager.check_error(
+            error_type="AgentError",
+            message=exc.message,
+        ))
     return JSONResponse(
         status_code=500,
         content={
@@ -291,6 +318,14 @@ async def no_api_key_handler(request: Request, exc: NoAPIKeyError) -> JSONRespon
 @app.exception_handler(VersionConflictError)
 async def version_conflict_handler(request: Request, exc: VersionConflictError) -> JSONResponse:
     logger.warning("version_conflict_http", path=request.url.path, details=exc.details)
+    # 능동 알림: 메모리 충돌
+    if alert_manager:
+        asyncio.create_task(alert_manager.check_memory_conflict(
+            scope=exc.details.get("scope", ""),
+            domain=exc.details.get("domain", ""),
+            expected_version=exc.details.get("expected_version", 0),
+            actual_version=exc.details.get("actual_version", 0),
+        ))
     return JSONResponse(
         status_code=409,
         content={
@@ -377,6 +412,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         error_type=type(exc).__name__,
         error=str(exc)[:500],
     )
+    # 능동 알림: 서버 에러
+    if alert_manager:
+        asyncio.create_task(alert_manager.check_server_error(
+            path=request.url.path,
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        ))
     return JSONResponse(
         status_code=500,
         content={
@@ -513,6 +554,22 @@ async def query_agent(
     )
 
     latency_ms = (time.time() - start_time) * 1000
+
+    # 능동 알림: 비용 체크 + confidence 체크 (비차단)
+    if alert_manager and llm_provider:
+        cost = llm_provider.get_cost_summary()
+        asyncio.create_task(alert_manager.check_cost(
+            daily=cost.get("daily_cost_usd", 0),
+            monthly=cost.get("monthly_cost_usd", 0),
+            daily_limit=cost.get("daily_limit_usd", 0),
+            monthly_limit=cost.get("monthly_limit_usd", 0),
+        ))
+        asyncio.create_task(alert_manager.check_confidence(
+            confidence=result["confidence"],
+            query=request.query,
+        ))
+        # 성공 시 에러 카운터 리셋
+        alert_manager.reset_error_counter()
 
     return QueryResponse(
         answer=result["answer"],
@@ -897,3 +954,21 @@ async def event_stats() -> JSONResponse:
     """이벤트 저장소 통계"""
     store = _require_event_store()
     return JSONResponse(content=store.get_stats())
+
+
+# === Alert Endpoints ===
+
+
+@app.get(
+    "/v1/alerts/stats",
+    summary="알림 통계",
+    dependencies=[Depends(verify_api_key)],
+)
+async def alert_stats() -> JSONResponse:
+    """능동 알림 시스템 통계"""
+    if alert_manager is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "SERVICE_UNAVAILABLE", "message": "Alert Manager 미초기화"},
+        )
+    return JSONResponse(content=alert_manager.get_stats())
