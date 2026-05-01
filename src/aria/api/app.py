@@ -62,6 +62,8 @@ from aria.memory.types import (
     validate_domain,
     validate_scope,
 )
+from aria.tools.tool_registry import ToolRegistry
+from aria.tools.builtin import MemoryReadTool, MemoryWriteTool, KnowledgeSearchTool
 
 logger = structlog.get_logger()
 
@@ -71,13 +73,14 @@ vector_store: VectorStore | None = None
 react_agent: ReActAgent | None = None
 index_manager: IndexManager | None = None
 memory_loader: MemoryLoader | None = None
+tool_registry: ToolRegistry | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 시작/종료 시 초기화"""
     global llm_provider, vector_store, react_agent, rate_limiter
-    global index_manager, memory_loader
+    global index_manager, memory_loader, tool_registry
 
     config = get_config()
 
@@ -94,11 +97,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     index_manager = IndexManager(storage)
     memory_loader = MemoryLoader(index_manager, config.memory.token_budget)
 
+    # Tool Registry 초기화 + Built-in Tools 등록
+    from aria.tools.critic import CriticEvaluator
+    from aria.tools.critic_types import CriticConfig
+
+    critic = CriticEvaluator(llm_provider, CriticConfig())
+    tool_registry = ToolRegistry(critic=critic)
+    tool_registry.register_executor(MemoryReadTool(index_manager))
+    tool_registry.register_executor(MemoryWriteTool(index_manager))
+    tool_registry.register_executor(KnowledgeSearchTool(hybrid_retriever))
+
     react_agent = ReActAgent(
         llm_provider,
         vector_store,
         hybrid_retriever=hybrid_retriever,
         memory_loader=memory_loader,
+        tool_registry=tool_registry,
     )
 
     rate_limiter = RateLimiter(
@@ -114,6 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         hybrid_retrieval=True,
         memory_base_path=config.memory.base_path,
         memory_token_budget=config.memory.token_budget,
+        tools_registered=tool_registry.tool_count,
     )
     yield
     logger.info("aria_engine_stopped")
@@ -408,6 +423,7 @@ class QueryResponse(BaseModel):
     cost_summary: dict[str, Any]
     latency_ms: float
     memory_loaded: list[str] = Field(default_factory=list, description="로딩된 메모리 도메인")
+    tool_calls_made: int = Field(default=0, description="도구 호출 횟수")
 
 
 class DocumentInput(BaseModel):
@@ -476,6 +492,7 @@ async def query_agent(
         cost_summary=result["cost_summary"],
         latency_ms=round(latency_ms, 2),
         memory_loaded=result.get("memory_loaded", []),
+        tool_calls_made=result.get("tool_calls_made", 0),
     )
 
 

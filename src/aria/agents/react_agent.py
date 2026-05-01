@@ -33,6 +33,7 @@ from aria.rag.vector_store import VectorStore
 logger = structlog.get_logger()
 
 MAX_ITERATIONS = 3  # 최대 ReAct 루프 반복 횟수
+MAX_TOOL_ITERATIONS = 5  # 도구 호출 루프 최대 반복 (무한루프 방지)
 
 
 class AgentAction(str, Enum):
@@ -59,6 +60,7 @@ class AgentState:
     should_stop: bool = False
     error: str = ""  # 에러 메시지 전달용
     memory_context: str = ""  # 메모리 마크다운 (Layer 1 주입)
+    tool_calls_made: int = 0  # 도구 호출 총 횟수 (비용 추적용)
 
 
 INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다.
@@ -198,11 +200,13 @@ class ReActAgent:
         vector_store: VectorStore,
         hybrid_retriever: Any | None = None,
         memory_loader: Any | None = None,
+        tool_registry: Any | None = None,
     ) -> None:
         self.llm = llm
         self.vector_store = vector_store
         self.hybrid_retriever = hybrid_retriever
         self.memory_loader = memory_loader
+        self.tool_registry = tool_registry
         self._graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -352,6 +356,13 @@ class ReActAgent:
     async def _reason(self, state: AgentState) -> dict[str, Any]:
         """Step 3: 논리적 추론 (SYSTEM_PROMPT_DYNAMIC_BOUNDARY 적용)
 
+        도구가 등록된 경우:
+            LLM에 도구 목록을 전달하여 자율적 도구 선택/실행 루프 수행
+            최대 MAX_TOOL_ITERATIONS회 도구 호출 후 최종 답변 생성
+
+        도구가 없는 경우:
+            기존 동작 유지 (단순 추론)
+
         시스템 프롬프트 구조:
         - REASONING_SYSTEM (고정 → cache_control + ephemeral → 캐시됨)
         - REASONING_SYSTEM_DYNAMIC (동적 → 메모리 컨텍스트 / 캐시 경계 바깥)
@@ -374,12 +385,24 @@ class ReActAgent:
             previous_reasoning=previous,
         )
 
+        # 도구 사용 가능 여부 판단
+        has_tools = (
+            self.tool_registry is not None
+            and self.tool_registry.tool_count > 0
+        )
+
+        if has_tools:
+            return await self._reason_with_tools(
+                state, user_prompt, system_dynamic,
+            )
+
+        # === 기존 동작 (도구 없음) ===
         try:
             result = await self.llm.complete(
                 user_prompt,
                 system_prompt=REASONING_SYSTEM,
                 system_prompt_dynamic=system_dynamic,
-                cache_system_prompt=True,  # Prompt Caching — 고정 영역만 캐시
+                cache_system_prompt=True,
                 model_tier="default",
                 temperature=0.5,
             )
@@ -399,6 +422,153 @@ class ReActAgent:
             "current_answer": result["content"],
             "reasoning_steps": new_steps,
             "iteration": state.iteration + 1,
+        }
+
+    async def _reason_with_tools(
+        self,
+        state: AgentState,
+        user_prompt: str,
+        system_dynamic: str,
+    ) -> dict[str, Any]:
+        """도구 호출 루프가 포함된 추론
+
+        LLM에 도구 목록을 전달 → tool_calls 응답 시 실행 → 결과 피드백 → 반복
+        최대 MAX_TOOL_ITERATIONS회 반복 후 강제 텍스트 응답
+
+        Flow:
+            1. LLM 호출 (tools 포함)
+            2. tool_calls 응답? → ToolRegistry.execute() → 결과를 메시지에 추가
+            3. 2 반복 (최대 MAX_TOOL_ITERATIONS)
+            4. 텍스트 응답 → 최종 답변으로 반환
+        """
+        tools = self.tool_registry.to_llm_tools()
+
+        # 멀티턴 메시지 빌드 (시스템 + 사용자)
+        system_content = f"{REASONING_SYSTEM}\n\n{system_dynamic}"
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        tool_calls_made = state.tool_calls_made
+        tool_observations: list[str] = []
+
+        try:
+            for tool_iter in range(MAX_TOOL_ITERATIONS):
+                result = await self.llm.complete_with_messages(
+                    messages,
+                    tools=tools,
+                    model_tier="default",
+                    temperature=0.5,
+                )
+
+                tool_calls = result.get("tool_calls")
+                if not tool_calls:
+                    # LLM이 텍스트 응답 → 도구 루프 종료
+                    break
+
+                # === 도구 실행 ===
+                # assistant 메시지 추가 (tool_calls 포함)
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": result.get("content") or "",
+                    "tool_calls": tool_calls,
+                }
+                messages.append(assistant_msg)
+
+                for tc in tool_calls:
+                    func_name = tc["function"]["name"]
+                    func_args_str = tc["function"]["arguments"]
+                    tc_id = tc["id"]
+
+                    # 파라미터 파싱
+                    try:
+                        func_args = json.loads(func_args_str) if func_args_str else {}
+                    except json.JSONDecodeError:
+                        func_args = {}
+
+                    # ToolRegistry로 실행 (Critic 평가 포함)
+                    tool_result = await self.tool_registry.execute(
+                        func_name,
+                        func_args,
+                        context=f"사용자 질문: {state.query[:200]}",
+                    )
+                    tool_calls_made += 1
+
+                    observation = tool_result.to_observation()
+                    tool_observations.append(observation)
+
+                    # tool result 메시지 추가
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": observation,
+                    })
+
+                    logger.info(
+                        "agent_tool_executed",
+                        tool=func_name,
+                        success=tool_result.success,
+                        pending=tool_result.pending_confirmation,
+                        iteration=tool_iter + 1,
+                    )
+
+                    # NEEDS_CONFIRMATION → 루프 중단 (사용자 확인 대기)
+                    if tool_result.pending_confirmation:
+                        final_content = (
+                            f"도구 '{func_name}' 실행을 위해 사용자 확인이 필요합니다.\n"
+                            f"확인 ID: {tool_result.confirmation_id}"
+                        )
+                        new_steps = state.reasoning_steps + [
+                            f"[Iteration {state.iteration + 1}] 도구 확인 대기: {func_name}"
+                        ]
+                        return {
+                            "current_answer": final_content,
+                            "reasoning_steps": new_steps,
+                            "iteration": state.iteration + 1,
+                            "tool_calls_made": tool_calls_made,
+                        }
+
+            # 최종 답변 (도구 루프 후 LLM의 마지막 텍스트 응답)
+            final_content = result.get("content", "")
+
+            # 도구 루프 상한 도달 시 마지막 LLM 호출 (도구 없이)
+            if tool_calls and not final_content:
+                result = await self.llm.complete_with_messages(
+                    messages,
+                    model_tier="default",
+                    temperature=0.5,
+                )
+                final_content = result.get("content", "")
+
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
+            raise
+        except Exception as e:
+            logger.error(
+                "reasoning_with_tools_failed",
+                error=str(e),
+                iteration=state.iteration,
+                tool_calls_made=tool_calls_made,
+            )
+            raise AgentError(
+                f"도구 기반 추론 실패: {e}",
+                query=state.query,
+                iteration=state.iteration,
+            ) from e
+
+        # 도구 관찰 결과를 추론 단계에 포함
+        step_summary = f"[Iteration {state.iteration + 1}]"
+        if tool_observations:
+            step_summary += f" 도구 {len(tool_observations)}회 호출"
+        step_summary += f" {final_content[:500]}"
+
+        new_steps = state.reasoning_steps + [step_summary]
+
+        return {
+            "current_answer": final_content,
+            "reasoning_steps": new_steps,
+            "iteration": state.iteration + 1,
+            "tool_calls_made": tool_calls_made,
         }
 
     async def _self_reflect(self, state: AgentState) -> dict[str, Any]:
@@ -543,4 +713,5 @@ class ReActAgent:
             "search_results_count": len(final_state.get("search_results", [])),
             "cost_summary": self.llm.get_cost_summary(),
             "memory_loaded": memory_loaded,
+            "tool_calls_made": final_state.get("tool_calls_made", 0),
         }

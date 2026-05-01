@@ -339,6 +339,7 @@ class LLMProvider:
         temperature: float = 0.7,
         response_format: dict[str, Any] | None = None,
         cache_system_prompt: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """LLM 호출 (자동 비용 추적 + KillSwitch + Fallback Chain)
 
@@ -355,9 +356,13 @@ class LLMProvider:
             temperature: 생성 온도
             response_format: 응답 포맷 (JSON mode 등)
             cache_system_prompt: True면 시스템 프롬프트에 캐시 마커 추가 (Anthropic 전용)
+            tools: LLM function calling 도구 목록
+                [{"type": "function", "function": {"name": ..., "parameters": ...}}, ...]
+                None이면 도구 미사용 (기존 동작 유지)
 
         Returns:
-            {"content": str, "model": str, "usage": UsageRecord}
+            {"content": str, "model": str, "usage": UsageRecord,
+             "tool_calls": list[dict] | None}
 
         Raises:
             KillSwitchError: 비용 상한 초과
@@ -400,6 +405,8 @@ class LLMProvider:
         }
         if response_format:
             kwargs_base["response_format"] = response_format
+        if tools:
+            kwargs_base["tools"] = tools
 
         start_time = time.time()
         response = await self._call_llm_with_fallback(kwargs_base, model_tier, model)
@@ -407,11 +414,13 @@ class LLMProvider:
 
         record = self._record_usage(response, model or self._model_tiers.get(model_tier, ""), latency_ms)
         content = response.choices[0].message.content or ""
+        tool_calls = self._extract_tool_calls(response)
 
         return {
             "content": content,
             "model": record.model,
             "usage": record,
+            "tool_calls": tool_calls,
         }
 
     async def complete_with_messages(
@@ -422,8 +431,17 @@ class LLMProvider:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.7,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """멀티턴 대화용 LLM 호출 (messages 직접 전달 + Fallback Chain)
+
+        Args:
+            messages: 대화 메시지 목록 (role/content/tool_calls/tool_call_id)
+            tools: LLM function calling 도구 목록 (None이면 도구 미사용)
+
+        Returns:
+            {"content": str, "model": str, "usage": UsageRecord,
+             "tool_calls": list[dict] | None}
 
         Raises:
             KillSwitchError: 비용 상한 초과
@@ -436,18 +454,45 @@ class LLMProvider:
             "temperature": temperature,
             "max_tokens": max_tokens or self.config.llm.max_tokens_per_request,
         }
+        if tools:
+            kwargs_base["tools"] = tools
 
         start_time = time.time()
         response = await self._call_llm_with_fallback(kwargs_base, model_tier, model)
         latency_ms = (time.time() - start_time) * 1000
 
         record = self._record_usage(response, model or self._model_tiers.get(model_tier, ""), latency_ms)
+        tool_calls = self._extract_tool_calls(response)
 
         return {
             "content": response.choices[0].message.content or "",
             "model": record.model,
             "usage": record,
+            "tool_calls": tool_calls,
         }
+
+    @staticmethod
+    def _extract_tool_calls(response: Any) -> list[dict[str, Any]] | None:
+        """LLM 응답에서 tool_calls 추출
+
+        LiteLLM은 provider별 tool_call 포맷을 통일된 형식으로 반환.
+        None이면 도구 호출 없음 (일반 텍스트 응답).
+        """
+        message = response.choices[0].message
+        if not hasattr(message, "tool_calls") or not message.tool_calls:
+            return None
+
+        return [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in message.tool_calls
+        ]
 
     def get_cost_summary(self) -> dict[str, Any]:
         """현재 비용 요약"""
