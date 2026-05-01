@@ -107,6 +107,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tool_registry.register_executor(MemoryWriteTool(index_manager))
     tool_registry.register_executor(KnowledgeSearchTool(hybrid_retriever))
 
+    # MCP Tools — Notion (토큰 설정 시에만 등록)
+    if config.notion.is_configured:
+        from aria.tools.mcp.notion_tools import (
+            NotionClient,
+            NotionSearchTool,
+            NotionReadPageTool,
+            NotionCreatePageTool,
+        )
+        notion_client = NotionClient(config.notion)
+        tool_registry.register_executor(NotionSearchTool(notion_client))
+        tool_registry.register_executor(NotionReadPageTool(notion_client))
+        tool_registry.register_executor(NotionCreatePageTool(notion_client))
+        logger.info("notion_tools_registered", tools=3)
+    else:
+        logger.info("notion_tools_skipped", reason="ARIA_NOTION_TOKEN not set")
+
     react_agent = ReActAgent(
         llm_provider,
         vector_store,

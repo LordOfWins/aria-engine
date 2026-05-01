@@ -24,7 +24,15 @@ from aria.telegram.notifier import _split_message
 
 
 class TestTelegramConfig:
-    def test_default_values(self) -> None:
+    def test_default_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ARIA_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_ARIA_BASE_URL", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_ARIA_API_KEY", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_DEFAULT_SCOPE", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_DEFAULT_COLLECTION", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_REQUEST_TIMEOUT", raising=False)
+        monkeypatch.setenv("ARIA_ENV_FILE", "")
         config = TelegramConfig()
         assert config.bot_token == ""
         assert config.chat_id == ""
@@ -297,8 +305,12 @@ class TestHandlersMessage:
 
 
 class TestBotCreation:
-    def test_create_bot_missing_token_raises(self) -> None:
+    def test_create_bot_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from aria.telegram.bot import create_bot
+        monkeypatch.delenv("ARIA_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_ARIA_API_KEY", raising=False)
+        monkeypatch.setenv("ARIA_ENV_FILE", "")
         config = TelegramConfig()  # bot_token=""
 
         with pytest.raises(ValueError, match="BOT_TOKEN"):
@@ -306,6 +318,9 @@ class TestBotCreation:
 
     def test_create_bot_missing_chat_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from aria.telegram.bot import create_bot
+        monkeypatch.delenv("ARIA_TELEGRAM_CHAT_ID", raising=False)
+        monkeypatch.delenv("ARIA_TELEGRAM_ARIA_API_KEY", raising=False)
+        monkeypatch.setenv("ARIA_ENV_FILE", "")
         monkeypatch.setenv("ARIA_TELEGRAM_BOT_TOKEN", "fake-token")
         config = TelegramConfig()  # chat_id=""
 

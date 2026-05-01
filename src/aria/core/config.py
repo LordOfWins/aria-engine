@@ -129,6 +129,21 @@ class TelegramConfig(BaseSettings):
     request_timeout: int = Field(default=120, ge=10, le=300, description="ARIA API 요청 타임아웃 (초)")
 
 
+class NotionConfig(BaseSettings):
+    """Notion API 설정"""
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_NOTION_", env_file=_get_env_file(), extra="ignore")
+
+    token: str = Field(default="", description="Notion Internal Integration Token")
+    api_version: str = Field(default="2022-06-28", description="Notion API 버전")
+    request_timeout: int = Field(default=30, ge=5, le=120, description="API 요청 타임아웃 (초)")
+
+    @property
+    def is_configured(self) -> bool:
+        """Notion 토큰이 설정되어 있는지 확인"""
+        return bool(self.token)
+
+
 class AriaConfig(BaseSettings):
     """ARIA 통합 설정"""
 
@@ -140,6 +155,7 @@ class AriaConfig(BaseSettings):
     api: APIConfig = Field(default_factory=APIConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    notion: NotionConfig = Field(default_factory=NotionConfig)
 
     # Provider API Keys (LiteLLM이 자동 참조)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")

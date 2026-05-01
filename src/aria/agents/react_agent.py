@@ -11,6 +11,7 @@ Think → Act → Observe 루프 기반 자율 추론 에이전트
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Annotated
@@ -80,16 +81,25 @@ INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다
 INTENT_ANALYSIS_USER = """사용자 질문: {query}"""
 
 
-REASONING_SYSTEM = """당신은 논리적 추론 전문가입니다.
+REASONING_SYSTEM = """당신은 ARIA — 승재의 개인 AI 비서입니다. 자연스럽고 도움이 되는 답변을 제공하세요.
 
-주어진 정보를 바탕으로 단계적으로 사고하여 답변을 도출하세요.
+내부적으로 단계적 사고를 진행하되, 사용자에게는 최종 답변만 보여야 합니다.
+반드시 아래 형식을 따르세요:
 
-다음 형식으로 응답하세요:
-1. 현재까지 알고 있는 것을 정리
-2. 부족한 정보가 있다면 무엇인지
-3. 논리적 추론 과정
-4. 결론 및 답변
-5. 확신도 (0.0 ~ 1.0)"""
+<reasoning>
+(여기서 내부적으로 사고합니다: 알려진 정보 정리 / 부족한 정보 / 논리적 추론 / 확신도)
+이 영역은 사용자에게 보이지 않습니다.
+</reasoning>
+
+<answer>
+(사용자에게 보여줄 최종 답변만 여기에 작성합니다)
+</answer>
+
+규칙:
+- <answer> 태그 안의 내용만 사용자에게 전달됩니다
+- 추론 과정, 확신도, 단계 번호 등을 <answer> 안에 포함하지 마세요
+- 자연스럽고 대화체로 답변하세요
+- 한국어로 답변하세요 (영어 질문이면 영어로)"""
 
 # SYSTEM_PROMPT_DYNAMIC_BOUNDARY 이후 영역
 # 메모리 컨텍스트는 시스템 프롬프트의 동적 영역에 배치하여
@@ -134,6 +144,26 @@ SELF_REFLECTION_USER = """## 원래 질문
 
 ## 현재 답변
 {answer}"""
+
+
+FAST_RESPOND_SYSTEM = """당신은 ARIA — 승재의 개인 AI 비서입니다.
+간단한 인사, 잡담, 명확한 질문에 자연스럽게 답변하세요.
+한국어로 답변하세요 (영어 질문이면 영어로).
+간결하고 따뜻하게 응답하세요."""
+
+FAST_RESPOND_USER = """{query}"""
+
+
+def _extract_answer(content: str) -> str:
+    """LLM 응답에서 <answer> 태그 안의 최종 답변만 추출
+
+    <answer>...</answer> 형식이면 answer 내용만 반환
+    태그가 없으면 원본 그대로 반환 (하위 호환)
+    """
+    match = re.search(r"<answer>\s*(.*?)\s*</answer>", content, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return content.strip()
 
 
 def _safe_parse_json(content: str) -> dict[str, Any] | None:
@@ -215,6 +245,7 @@ class ReActAgent:
 
         # 노드 등록
         workflow.add_node("analyze_intent", self._analyze_intent)
+        workflow.add_node("fast_respond", self._fast_respond)
         workflow.add_node("search_knowledge", self._search_knowledge)
         workflow.add_node("reason", self._reason)
         workflow.add_node("self_reflect", self._self_reflect)
@@ -226,11 +257,13 @@ class ReActAgent:
             "analyze_intent",
             self._route_after_intent,
             {
+                "fast_respond": "fast_respond",
                 "search_knowledge": "search_knowledge",
                 "reason": "reason",
                 "respond": "respond",
             },
         )
+        workflow.add_edge("fast_respond", END)
         workflow.add_edge("search_knowledge", "reason")
         workflow.add_edge("reason", "self_reflect")
         workflow.add_conditional_edges(
@@ -295,15 +328,56 @@ class ReActAgent:
     def _route_after_intent(self, state: AgentState) -> str:
         """의도 분석 후 라우팅 결정
 
-        모든 의도는 reason 단계를 거쳐 LLM이 실제 답변을 생성하도록 함
-        - respond/clarify: 검색 불필요 → 바로 reason으로
-        - search_knowledge: 검색 후 reason으로
+        Fast path: simple 복잡도 + respond/clarify → LLM 1회로 즉답
+        Normal path: 검색 → 추론 → 성찰 → 응답
         """
         action = state.intent.get("recommended_action", "search_knowledge")
+        complexity = state.intent.get("complexity", "moderate")
+
+        # Fast path: 간단한 인사/잡담은 즉시 응답 (LLM 1회)
+        if complexity == "simple" and action in ("respond", "clarify"):
+            return "fast_respond"
 
         if action in ("respond", "clarify"):
             return "reason"  # 검색 스킵 / 추론은 반드시 수행
         return "search_knowledge"
+
+    async def _fast_respond(self, state: AgentState) -> dict[str, Any]:
+        """Fast path: 간단한 질문에 LLM 1회 호출로 즉답
+
+        simple 복잡도 + respond/clarify 의도일 때만 진입
+        검색/추론/성찰 없이 cheap 모델로 즉시 답변 → 비용+시간 절약
+        """
+        user_prompt = FAST_RESPOND_USER.format(query=state.query)
+
+        try:
+            result = await self.llm.complete(
+                user_prompt,
+                system_prompt=FAST_RESPOND_SYSTEM,
+                cache_system_prompt=True,
+                model_tier="cheap",
+                temperature=0.7,
+            )
+        except (KillSwitchError, LLMAllProvidersExhaustedError, NoAPIKeyError):
+            raise
+        except Exception as e:
+            logger.warning("fast_respond_failed", error=str(e))
+            # fast path 실패 시 빈 답변 → _respond에서 기본 메시지 출력
+            return {
+                "current_answer": "",
+                "confidence": 0.5,
+                "iteration": 1,
+            }
+
+        answer = result["content"]
+        logger.info("fast_respond_success", answer_length=len(answer))
+
+        return {
+            "messages": [{"role": "assistant", "content": answer}],
+            "current_answer": answer,
+            "confidence": 0.9,
+            "iteration": 1,
+        }
 
     async def _search_knowledge(self, state: AgentState) -> dict[str, Any]:
         """Step 2: 지식 검색 (RAG — Hybrid Retrieval 지원)
@@ -421,7 +495,7 @@ class ReActAgent:
         new_steps = state.reasoning_steps + [f"[Iteration {state.iteration + 1}] {result['content'][:500]}"]
 
         return {
-            "current_answer": result["content"],
+            "current_answer": _extract_answer(result["content"]),
             "reasoning_steps": new_steps,
             "iteration": state.iteration + 1,
         }
@@ -567,7 +641,7 @@ class ReActAgent:
         new_steps = state.reasoning_steps + [step_summary]
 
         return {
-            "current_answer": final_content,
+            "current_answer": _extract_answer(final_content),
             "reasoning_steps": new_steps,
             "iteration": state.iteration + 1,
             "tool_calls_made": tool_calls_made,
