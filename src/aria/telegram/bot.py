@@ -22,7 +22,6 @@ from telegram.ext import (
 from aria.core.config import TelegramConfig
 from aria.telegram.client import ARIAClient
 from aria.telegram.handlers import ARIAHandlers
-from aria.telegram.briefing import schedule_daily_briefing
 
 logger = structlog.get_logger()
 
@@ -91,16 +90,6 @@ def create_bot(config: TelegramConfig) -> Application:
         chat_id=config.chat_id,
         aria_url=config.aria_base_url,
         default_scope=config.default_scope,
-    )
-
-    # 매일 아침 브리핑 스케줄 등록 (KST 06:00)
-    schedule_daily_briefing(
-        app=app,
-        bot_token=config.bot_token,
-        chat_id=config.chat_id,
-        client=aria_client,
-        hour=6,
-        minute=0,
     )
 
     return app
