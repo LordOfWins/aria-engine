@@ -212,7 +212,7 @@ class ARIAHandlers:
             return
 
         # 응답 포맷
-        answer = data.get("answer", "응답을 생성하지 못했습니다.")
+        answer = data.get("answer") or "응답을 생성하지 못했습니다."
         tool_calls = data.get("tool_calls_made", 0)
         confidence = data.get("confidence", 0)
 
@@ -232,7 +232,11 @@ class ARIAHandlers:
         try:
             await update.message.reply_text(response_text, parse_mode="Markdown")
         except Exception:
-            await update.message.reply_text(answer)
+            try:
+                await update.message.reply_text(answer)
+            except Exception as send_err:
+                logger.error("telegram_send_failed", error=str(send_err)[:200])
+                await update.message.reply_text("⚠️ 응답 전송 중 오류가 발생했습니다.")
 
     # === HITL 콜백 핸들러 ===
 
