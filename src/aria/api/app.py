@@ -62,7 +62,7 @@ from aria.memory.types import (
     validate_domain,
     validate_scope,
 )
-from aria.tools.tool_registry import ToolRegistry
+from aria.tools.tool_registry import ToolRegistry, ToolNotFoundError
 from aria.tools.builtin import MemoryReadTool, MemoryWriteTool, KnowledgeSearchTool
 
 logger = structlog.get_logger()
@@ -710,3 +710,58 @@ async def load_memory(
         budget_used=round(result.budget_used, 4),
     )
     return JSONResponse(content=resp.model_dump(mode="json"))
+
+
+# === HITL (Human-in-the-Loop) Pending Actions ===
+
+
+@app.post(
+    "/v1/tools/pending/{confirmation_id}/execute",
+    summary="승인된 대기 도구 실행",
+    dependencies=[Depends(verify_api_key)],
+)
+async def execute_pending_tool(confirmation_id: str) -> JSONResponse:
+    """사용자가 승인한 대기 도구 액션을 실행"""
+    if tool_registry is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "SERVICE_UNAVAILABLE", "message": "Tool Registry 미초기화"},
+        )
+
+    try:
+        result = await tool_registry.execute_pending(confirmation_id)
+        return JSONResponse(content={
+            "tool_name": result.tool_name,
+            "success": result.success,
+            "output": result.output,
+            "error": result.error,
+            "latency_ms": result.latency_ms,
+        })
+    except ToolNotFoundError:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "PENDING_NOT_FOUND",
+                "message": f"대기 액션이 만료되었거나 존재하지 않습니다: {confirmation_id}",
+            },
+        )
+
+
+@app.delete(
+    "/v1/tools/pending/{confirmation_id}",
+    summary="대기 도구 거부 (삭제)",
+    dependencies=[Depends(verify_api_key)],
+)
+async def deny_pending_tool(confirmation_id: str) -> JSONResponse:
+    """사용자가 거부한 대기 도구 액션을 삭제"""
+    if tool_registry is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "SERVICE_UNAVAILABLE", "message": "Tool Registry 미초기화"},
+        )
+
+    removed = tool_registry.deny_pending(confirmation_id)
+    return JSONResponse(content={
+        "confirmation_id": confirmation_id,
+        "removed": removed,
+    })

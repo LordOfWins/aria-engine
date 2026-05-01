@@ -71,12 +71,40 @@ class ARIAClient:
         """헬스 체크"""
         return await self._get("/v1/health")
 
+    async def execute_pending(self, confirmation_id: str) -> dict[str, Any]:
+        """승인된 대기 도구 실행"""
+        return await self._post(
+            f"/v1/tools/pending/{confirmation_id}/execute",
+            {},
+        )
+
+    async def deny_pending(self, confirmation_id: str) -> dict[str, Any]:
+        """대기 도구 거부"""
+        return await self._delete(f"/v1/tools/pending/{confirmation_id}")
+
     async def _get(self, path: str) -> dict[str, Any]:
         """GET 요청"""
         url = f"{self.base_url}{path}"
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.get(url, headers=self._headers)
+                return self._handle_response(response, path)
+        except httpx.TimeoutException:
+            logger.error("aria_client_timeout", path=path, timeout=self._timeout)
+            return {"error": "TIMEOUT", "message": f"ARIA 서버 응답 시간 초과 ({self._timeout}초)"}
+        except httpx.ConnectError:
+            logger.error("aria_client_connect_error", path=path, base_url=self.base_url)
+            return {"error": "CONNECTION_ERROR", "message": f"ARIA 서버 연결 실패: {self.base_url}"}
+        except Exception as e:
+            logger.error("aria_client_error", path=path, error=str(e)[:200])
+            return {"error": "CLIENT_ERROR", "message": str(e)[:300]}
+
+    async def _delete(self, path: str) -> dict[str, Any]:
+        """DELETE 요청"""
+        url = f"{self.base_url}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.delete(url, headers=self._headers)
                 return self._handle_response(response, path)
         except httpx.TimeoutException:
             logger.error("aria_client_timeout", path=path, timeout=self._timeout)

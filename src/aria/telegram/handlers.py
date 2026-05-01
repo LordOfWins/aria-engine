@@ -291,15 +291,31 @@ class ARIAHandlers:
         action = parts[2]
 
         if action == "approve":
-            # TODO: Phase 3 후속 — pending store에서 도구 실행
-            await query.answer("✅ 승인됨")
-            await query.edit_message_text(
-                f"✅ 승인 완료 (ID: `{confirmation_id}`)\n\n"
-                f"_도구 실행은 다음 업데이트에서 구현됩니다_",
-                parse_mode="Markdown",
-            )
+            await query.answer("✅ 승인 — 실행 중...")
+
+            try:
+                result = await self.client.execute_pending(confirmation_id)
+                if "error" in result:
+                    error_msg = result.get("message", "알 수 없는 오류")
+                    await query.edit_message_text(f"⚠️ 실행 실패: {error_msg}")
+                elif result.get("success"):
+                    output = str(result.get("output", ""))[:1000] or "(빈 결과)"
+                    tool_name = result.get("tool_name", "?")
+                    await query.edit_message_text(
+                        f"✅ *실행 완료*\n\n"
+                        f"도구: `{tool_name}`\n"
+                        f"결과: {output}",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    error = result.get("error", "실행 실패")
+                    await query.edit_message_text(f"❌ 실행 실패: {error[:500]}")
+            except Exception as e:
+                await query.edit_message_text(f"⚠️ 실행 오류: {str(e)[:300]}")
+
             logger.info("hitl_approved", confirmation_id=confirmation_id)
         elif action == "deny":
+            await self.client.deny_pending(confirmation_id)
             await query.answer("❌ 거부됨")
             await query.edit_message_text(
                 f"❌ 거부됨 (ID: `{confirmation_id}`)",

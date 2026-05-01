@@ -26,6 +26,7 @@ import structlog
 from aria.core.exceptions import AriaError, ToolExecutionBlockedError
 from aria.tools.critic import CriticEvaluator
 from aria.tools.critic_types import CriticConfig, SafetyLevel, ToolAction
+from aria.tools.pending_store import PendingAction, PendingStore
 from aria.tools.tool_types import (
     ToolCategory,
     ToolDefinition,
@@ -83,9 +84,14 @@ class ToolRegistry:
         result = await registry.execute("my_tool", {"param": "value"}, context="대화 요약")
     """
 
-    def __init__(self, critic: CriticEvaluator | None = None) -> None:
+    def __init__(
+        self,
+        critic: CriticEvaluator | None = None,
+        pending_store: PendingStore | None = None,
+    ) -> None:
         self._tools: dict[str, tuple[ToolDefinition, ToolExecutor]] = {}
         self._critic = critic
+        self._pending_store = pending_store or PendingStore()
 
     # === 등록/제거 ===
 
@@ -272,6 +278,78 @@ class ToolRegistry:
                 latency_ms=latency_ms,
             )
 
+    async def execute_pending(self, confirmation_id: str) -> ToolResult:
+        """승인된 대기 액션 실행
+
+        PendingStore에서 확인 ID로 액션을 조회하여 실행
+        Critic 재평가 없이 직접 실행 (이미 사용자가 승인함)
+
+        Args:
+            confirmation_id: 확인 ID
+
+        Returns:
+            ToolResult: 실행 결과
+
+        Raises:
+            ToolNotFoundError: 대기 액션 없음 또는 만료
+        """
+        action = self._pending_store.get(confirmation_id)
+        if action is None:
+            raise ToolNotFoundError(f"pending:{confirmation_id}")
+
+        # 도구 존재 여부 확인
+        if action.tool_name not in self._tools:
+            self._pending_store.remove(confirmation_id)
+            raise ToolNotFoundError(action.tool_name)
+
+        definition, executor = self._tools[action.tool_name]
+
+        # 대기 액션 삭제 (1회 실행 후 폐기)
+        self._pending_store.remove(confirmation_id)
+
+        # Critic 스킵 — 사용자가 이미 승인
+        start = time.monotonic()
+        try:
+            result = await executor.execute(action.parameters)
+            result.latency_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                "pending_tool_executed",
+                confirmation_id=confirmation_id,
+                tool_name=action.tool_name,
+                success=result.success,
+            )
+            return result
+        except Exception as e:
+            latency_ms = (time.monotonic() - start) * 1000
+            logger.error(
+                "pending_tool_execution_failed",
+                confirmation_id=confirmation_id,
+                tool_name=action.tool_name,
+                error=str(e)[:200],
+            )
+            return ToolResult(
+                tool_name=action.tool_name,
+                success=False,
+                error=f"도구 실행 중 오류: {str(e)[:500]}",
+                latency_ms=latency_ms,
+            )
+
+    def deny_pending(self, confirmation_id: str) -> bool:
+        """대기 액션 거부 (삭제)
+
+        Returns:
+            True if action existed and was removed
+        """
+        removed = self._pending_store.remove(confirmation_id)
+        if removed:
+            logger.info("pending_tool_denied", confirmation_id=confirmation_id)
+        return removed
+
+    @property
+    def pending_store(self) -> PendingStore:
+        """PendingStore 인스턴스 접근"""
+        return self._pending_store
+
     # === Private Methods ===
 
     def _validate_parameters(
@@ -327,6 +405,15 @@ class ToolRegistry:
                 confirmation_id=confirmation_id,
                 reason=judgment.reason[:100],
             )
+
+            # PendingStore에 저장 → 사용자 승인 시 실행 가능
+            self._pending_store.add(PendingAction(
+                confirmation_id=confirmation_id,
+                tool_name=definition.name,
+                parameters=parameters,
+                context=context,
+            ))
+
             return ToolResult(
                 tool_name=definition.name,
                 success=False,
