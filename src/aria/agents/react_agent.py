@@ -293,14 +293,16 @@ class ReActAgent:
         return {"intent": intent}
 
     def _route_after_intent(self, state: AgentState) -> str:
-        """의도 분석 후 라우팅 결정"""
-        action = state.intent.get("recommended_action", "search_knowledge")
-        complexity = state.intent.get("complexity", "moderate")
+        """의도 분석 후 라우팅 결정
 
-        if action == "respond" and complexity == "simple":
-            return "respond"
-        if action == "clarify":
-            return "respond"  # 명확화 요청도 응답으로 처리
+        모든 의도는 reason 단계를 거쳐 LLM이 실제 답변을 생성하도록 함
+        - respond/clarify: 검색 불필요 → 바로 reason으로
+        - search_knowledge: 검색 후 reason으로
+        """
+        action = state.intent.get("recommended_action", "search_knowledge")
+
+        if action in ("respond", "clarify"):
+            return "reason"  # 검색 스킵 / 추론은 반드시 수행
         return "search_knowledge"
 
     async def _search_knowledge(self, state: AgentState) -> dict[str, Any]:
@@ -640,6 +642,7 @@ class ReActAgent:
 
         return {
             "messages": [{"role": "assistant", "content": answer}],
+            "current_answer": answer,
         }
 
     async def run(
