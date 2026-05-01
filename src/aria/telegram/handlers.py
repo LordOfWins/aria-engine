@@ -74,7 +74,8 @@ class ARIAHandlers:
             "/help — 도움말\n"
             "/cost — API 비용 현황\n"
             "/memory — 메모리 인덱스\n"
-            "/health — 서버 상태\n\n"
+            "/health — 서버 상태\n"
+            "/briefing — 즉시 브리핑\n\n"
             "자유롭게 질문하세요!",
             parse_mode="Markdown",
         )
@@ -93,7 +94,8 @@ class ARIAHandlers:
             "`/cost` — 오늘/이번 달 API 비용\n"
             "`/memory` — 저장된 메모리 토픽 목록\n"
             "`/memory testorum` — 특정 스코프 조회\n"
-            "`/health` — ARIA 서버 상태 확인\n\n"
+            "`/health` — ARIA 서버 상태 확인\n"
+            "`/briefing` — 즉시 브리핑 받기\n\n"
             "*스코프 지정*\n"
             "`@testorum 질문` — Testorum 스코프로 질문\n"
             "`@talksim 질문` — Talksim 스코프로 질문",
@@ -169,6 +171,26 @@ class ARIAHandlers:
         version = data.get("version", "?")
         emoji = "✅" if status == "ok" else "⚠️"
         await update.message.reply_text(f"{emoji} ARIA {version} — {status}")
+
+    async def briefing(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/briefing — 즉시 브리핑 전송"""
+        if not self._is_authorized(update):
+            return
+
+        from aria.telegram.briefing import build_briefing
+
+        await update.message.reply_text("📋 브리핑 생성 중...")
+
+        try:
+            text = await build_briefing(self.client)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 브리핑 생성 실패: {str(e)[:200]}")
+            return
+
+        try:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(text)
 
     # === 일반 메시지 핸들러 ===
 
