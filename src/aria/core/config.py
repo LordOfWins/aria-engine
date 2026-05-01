@@ -144,6 +144,16 @@ class NotionConfig(BaseSettings):
         return bool(self.token)
 
 
+class EventConfig(BaseSettings):
+    """이벤트 수집 시스템 설정"""
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_EVENT_", env_file=_get_env_file(), extra="ignore")
+
+    base_path: str = Field(default="./events", description="이벤트 파일 루트 경로")
+    max_buffer_size: int = Field(default=1000, ge=100, le=10000, description="인메모리 버퍼 최대 크기")
+    retention_days: int = Field(default=30, ge=1, le=365, description="이벤트 보관 기간 (일)")
+
+
 class AriaConfig(BaseSettings):
     """ARIA 통합 설정"""
 
@@ -156,6 +166,7 @@ class AriaConfig(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     notion: NotionConfig = Field(default_factory=NotionConfig)
+    event: EventConfig = Field(default_factory=EventConfig)
 
     # Provider API Keys (LiteLLM이 자동 참조)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")

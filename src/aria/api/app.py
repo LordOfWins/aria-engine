@@ -11,6 +11,9 @@ REST API 엔드포인트
 - PUT /v1/memory/{scope}/topics/{domain} → 토픽 upsert
 - DELETE /v1/memory/{scope}/topics/{domain} → 토픽 삭제
 - POST /v1/memory/{scope}/load → 메모리 로딩 (프롬프트 마크다운)
+- POST /v1/events → 이벤트 수집 (배치)
+- GET /v1/events → 이벤트 조회 (필터링)
+- GET /v1/events/stats → 이벤트 통계
 - 글로벌 에러 핸들러 → 구조화된 에러 응답
 - Rate limiting → 요청 제한
 """
@@ -64,6 +67,8 @@ from aria.memory.types import (
 )
 from aria.tools.tool_registry import ToolRegistry, ToolNotFoundError
 from aria.tools.builtin import MemoryReadTool, MemoryWriteTool, KnowledgeSearchTool
+from aria.events.event_store import EventStore
+from aria.events.types import EventIngestRequest, EventIngestResponse, EventQuery
 
 logger = structlog.get_logger()
 
@@ -74,13 +79,14 @@ react_agent: ReActAgent | None = None
 index_manager: IndexManager | None = None
 memory_loader: MemoryLoader | None = None
 tool_registry: ToolRegistry | None = None
+event_store: EventStore | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 시작/종료 시 초기화"""
     global llm_provider, vector_store, react_agent, rate_limiter
-    global index_manager, memory_loader, tool_registry
+    global index_manager, memory_loader, tool_registry, event_store
 
     config = get_config()
 
@@ -131,6 +137,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         tool_registry=tool_registry,
     )
 
+    # Event Store 초기화
+    event_store = EventStore(
+        base_path=config.event.base_path,
+        max_buffer_size=config.event.max_buffer_size,
+        retention_days=config.event.retention_days,
+    )
+
     rate_limiter = RateLimiter(
         max_requests=config.api.rate_limit_per_minute,
         window_seconds=60,
@@ -145,6 +158,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         memory_base_path=config.memory.base_path,
         memory_token_budget=config.memory.token_budget,
         tools_registered=tool_registry.tool_count,
+        event_store_path=config.event.base_path,
     )
     yield
     logger.info("aria_engine_stopped")
@@ -765,3 +779,121 @@ async def deny_pending_tool(confirmation_id: str) -> JSONResponse:
         "confirmation_id": confirmation_id,
         "removed": removed,
     })
+
+
+# === Event Collection Endpoints ===
+
+
+def _require_event_store() -> EventStore:
+    """이벤트 저장소 초기화 확인"""
+    if event_store is None:
+        raise HTTPException(status_code=503, detail="Event store not initialized")
+    return event_store
+
+
+@app.post(
+    "/v1/events",
+    summary="이벤트 수집",
+    response_model=EventIngestResponse,
+    dependencies=[Depends(verify_api_key)],
+)
+async def ingest_events(request: EventIngestRequest) -> JSONResponse:
+    """제품(Testorum/Talksim/AutoTube)에서 이벤트 인입
+
+    배치 인입 지원 (최대 100개/요청)
+    """
+    store = _require_event_store()
+
+    try:
+        events = store.ingest_batch(request.events)
+        event_ids = [e.event_id for e in events]
+
+        logger.info(
+            "events_ingested",
+            count=len(events),
+            sources=list({e.source for e in events}),
+        )
+
+        return JSONResponse(content={
+            "status": "ok",
+            "ingested": len(events),
+            "event_ids": event_ids,
+        })
+    except OSError as e:
+        logger.error("event_ingest_failed", error=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "EVENT_STORAGE_ERROR",
+                "message": f"이벤트 저장 실패: {e}",
+            },
+        )
+
+
+@app.get(
+    "/v1/events",
+    summary="이벤트 조회",
+    dependencies=[Depends(verify_api_key)],
+)
+async def query_events(
+    source: str | None = None,
+    event_type: str | None = None,
+    severity: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 50,
+) -> JSONResponse:
+    """이벤트 조회 (필터링 / 최신순 정렬)"""
+    store = _require_event_store()
+
+    # severity 문자열 → enum 변환
+    severity_enum = None
+    if severity:
+        try:
+            from aria.events.types import EventSeverity
+            severity_enum = EventSeverity(severity.lower())
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "INVALID_SEVERITY",
+                    "message": f"유효하지 않은 severity: '{severity}'. 허용: info, warning, error",
+                },
+            )
+
+    # limit 범위 검증
+    if limit < 1 or limit > 500:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "INVALID_LIMIT",
+                "message": "limit은 1~500 사이여야 합니다",
+            },
+        )
+
+    q = EventQuery(
+        source=source,
+        event_type=event_type,
+        severity=severity_enum,
+        since=since,
+        until=until,
+        limit=limit,
+    )
+
+    events = store.query(q)
+    return JSONResponse(content={
+        "events": [e.model_dump(mode="json") for e in events],
+        "count": len(events),
+        "query": q.model_dump(mode="json"),
+    })
+
+
+@app.get(
+    "/v1/events/stats",
+    summary="이벤트 통계",
+    dependencies=[Depends(verify_api_key)],
+)
+async def event_stats() -> JSONResponse:
+    """이벤트 저장소 통계"""
+    store = _require_event_store()
+    return JSONResponse(content=store.get_stats())
