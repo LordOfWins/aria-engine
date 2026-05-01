@@ -5,6 +5,7 @@ Think → Act → Observe 루프 기반 자율 추론 에이전트
 - Self-Reflection 노드로 답변 품질 자체 평가
 - 최대 반복 횟수 제한으로 무한루프 방지
 - 구조화된 에러 처리 (AgentError / LLM / VectorStore 예외 분리)
+- SYSTEM_PROMPT_DYNAMIC_BOUNDARY: 고정 시스템 프롬프트는 캐시 / 메모리 컨텍스트는 동적 경계 바깥
 """
 
 from __future__ import annotations
@@ -88,14 +89,17 @@ REASONING_SYSTEM = """당신은 논리적 추론 전문가입니다.
 4. 결론 및 답변
 5. 확신도 (0.0 ~ 1.0)"""
 
+# SYSTEM_PROMPT_DYNAMIC_BOUNDARY 이후 영역
+# 메모리 컨텍스트는 시스템 프롬프트의 동적 영역에 배치하여
+# 고정 지시(REASONING_SYSTEM)는 캐시 유지 / 메모리만 매 턴 교체
+REASONING_SYSTEM_DYNAMIC = """## 메모리 컨텍스트
+{memory_context}"""
+
 REASONING_USER = """## 사용자 질문
 {query}
 
 ## 의도 분석
 {intent}
-
-## 메모리 컨텍스트
-{memory_context}
 
 ## 검색된 관련 정보
 {search_results}
@@ -346,7 +350,12 @@ class ReActAgent:
         return {"search_results": unique_results[:10]}
 
     async def _reason(self, state: AgentState) -> dict[str, Any]:
-        """Step 3: 논리적 추론"""
+        """Step 3: 논리적 추론 (SYSTEM_PROMPT_DYNAMIC_BOUNDARY 적용)
+
+        시스템 프롬프트 구조:
+        - REASONING_SYSTEM (고정 → cache_control + ephemeral → 캐시됨)
+        - REASONING_SYSTEM_DYNAMIC (동적 → 메모리 컨텍스트 / 캐시 경계 바깥)
+        """
         search_context = "\n\n".join(
             f"[관련도: {r['score']:.2f}] {r['text']}"
             for r in state.search_results
@@ -354,10 +363,13 @@ class ReActAgent:
 
         previous = "\n".join(state.reasoning_steps) if state.reasoning_steps else "첫 번째 추론 단계"
 
+        # 동적 경계: 메모리 컨텍스트를 시스템 프롬프트 동적 영역에 배치
+        memory_text = state.memory_context if state.memory_context else "메모리 없음"
+        system_dynamic = REASONING_SYSTEM_DYNAMIC.format(memory_context=memory_text)
+
         user_prompt = REASONING_USER.format(
             query=state.query,
             intent=str(state.intent),
-            memory_context=state.memory_context if state.memory_context else "메모리 없음",
             search_results=search_context,
             previous_reasoning=previous,
         )
@@ -366,7 +378,8 @@ class ReActAgent:
             result = await self.llm.complete(
                 user_prompt,
                 system_prompt=REASONING_SYSTEM,
-                cache_system_prompt=True,  # Prompt Caching — 추론 시스템 프롬프트 캐싱
+                system_prompt_dynamic=system_dynamic,
+                cache_system_prompt=True,  # Prompt Caching — 고정 영역만 캐시
                 model_tier="default",
                 temperature=0.5,
             )

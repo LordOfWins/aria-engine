@@ -44,6 +44,7 @@ from aria.core.exceptions import (
     MemoryNotFoundError,
     MemoryStorageError,
     MemoryScopeError,
+    ToolExecutionBlockedError,
 )
 from aria.providers.llm_provider import LLMProvider
 from aria.rag.vector_store import VectorStore
@@ -287,6 +288,25 @@ async def memory_storage_handler(request: Request, exc: MemoryStorageError) -> J
         content={
             "error": exc.code,
             "message": exc.message,
+        },
+    )
+
+
+# === Tool Safety Exception Handlers ===
+@app.exception_handler(ToolExecutionBlockedError)
+async def tool_blocked_handler(request: Request, exc: ToolExecutionBlockedError) -> JSONResponse:
+    logger.warning(
+        "tool_execution_blocked_http",
+        path=request.url.path,
+        tool_name=exc.details.get("tool_name"),
+        reason=exc.details.get("reason"),
+    )
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error": exc.code,
+            "message": exc.message,
+            "details": exc.details,
         },
     )
 

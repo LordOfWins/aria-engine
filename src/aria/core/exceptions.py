@@ -184,3 +184,24 @@ class MemoryScopeError(MemoryError):
             code="MEMORY_SCOPE_INVALID",
             scope=scope,
         )
+
+
+# === Tool Safety Exceptions ===
+
+
+class ToolExecutionBlockedError(AriaError):
+    """Critic이 UNSAFE로 판단하여 도구 실행 차단
+
+    Phase 3 Tool Integration에서 사용
+    """
+
+    def __init__(self, *, tool_name: str, reason: str, risk_factors: list[str] | None = None) -> None:
+        super().__init__(
+            f"도구 실행 차단: '{tool_name}' — {reason}",
+            code="TOOL_EXECUTION_BLOCKED",
+            details={
+                "tool_name": tool_name,
+                "reason": reason,
+                "risk_factors": risk_factors or [],
+            },
+        )

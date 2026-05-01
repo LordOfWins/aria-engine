@@ -6,6 +6,8 @@ LiteLLM 기반 멀티 프로바이더 LLM 호출
 - Fallback Chain: 장애 시 자동 대체 모델 전환 (모든 메서드 공통)
 - KillSwitch: 비용 상한 초과 시 자동 차단
 - Prompt Caching: 반복 시스템 프롬프트 캐싱으로 토큰 절감
+- Dynamic Boundary: 고정/동적 시스템 프롬프트 분리 (SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    → 고정 영역만 캐시하여 동적 컨텍스트(메모리 등) 변경 시에도 캐시 유지
 """
 
 from __future__ import annotations
@@ -332,6 +334,7 @@ class LLMProvider:
         model_tier: str = "default",
         model: str | None = None,
         system_prompt: str | None = None,
+        system_prompt_dynamic: str | None = None,
         max_tokens: int | None = None,
         temperature: float = 0.7,
         response_format: dict[str, Any] | None = None,
@@ -343,7 +346,11 @@ class LLMProvider:
             prompt: 사용자 프롬프트
             model_tier: "default" | "heavy" | "cheap" | "fallback"
             model: 직접 모델명 지정 (tier보다 우선)
-            system_prompt: 시스템 프롬프트
+            system_prompt: 시스템 프롬프트 (고정 영역 — 캐시 대상)
+            system_prompt_dynamic: 시스템 프롬프트 동적 영역 (캐시 경계 이후 — 매 턴 변경 가능)
+                cache_system_prompt=True일 때만 의미 있음.
+                고정 영역에 cache_control을 걸고 동적 영역은 캐시 밖에 배치하여
+                고정 부분만 90% 비용 절감 (SYSTEM_PROMPT_DYNAMIC_BOUNDARY 패턴)
             max_tokens: 최대 출력 토큰
             temperature: 생성 온도
             response_format: 응답 포맷 (JSON mode 등)
@@ -363,14 +370,25 @@ class LLMProvider:
         if system_prompt:
             sys_msg: dict[str, Any] = {"role": "system", "content": system_prompt}
             if cache_system_prompt:
-                # Anthropic prompt caching: cache_control 마커 추가
-                sys_msg["content"] = [
+                # SYSTEM_PROMPT_DYNAMIC_BOUNDARY 패턴:
+                # [static block + cache_control] → 캐시됨 (90% 비용 절감)
+                # [dynamic block] → 캐시 경계 바깥 (매 턴 변경 가능)
+                content_blocks: list[dict[str, Any]] = [
                     {
                         "type": "text",
                         "text": system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ]
+                if system_prompt_dynamic:
+                    content_blocks.append({
+                        "type": "text",
+                        "text": system_prompt_dynamic,
+                    })
+                sys_msg["content"] = content_blocks
+            elif system_prompt_dynamic:
+                # 캐싱 비활성 상태에서도 동적 영역은 시스템 프롬프트에 합산
+                sys_msg["content"] = f"{system_prompt}\n\n{system_prompt_dynamic}"
             messages.append(sys_msg)
         messages.append({"role": "user", "content": prompt})
 
