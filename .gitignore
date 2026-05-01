@@ -43,3 +43,4 @@ qdrant_data/
 # Logs
 logs/
 *.log
+memory/
