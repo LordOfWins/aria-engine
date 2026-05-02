@@ -132,6 +132,56 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.info("notion_tools_skipped", reason="ARIA_NOTION_TOKEN not set")
 
+    # MCP Tools — 카카오맵 (REST API 키 설정 시에만 등록)
+    if config.kakao_map.is_configured:
+        from aria.tools.mcp.kakao_map_tools import (
+            KakaoMapClient,
+            KakaoKeywordSearchTool,
+            KakaoAddressSearchTool,
+            KakaoCoord2AddressTool,
+        )
+        kakao_client = KakaoMapClient(config.kakao_map)
+        tool_registry.register_executor(KakaoKeywordSearchTool(kakao_client))
+        tool_registry.register_executor(KakaoAddressSearchTool(kakao_client))
+        tool_registry.register_executor(KakaoCoord2AddressTool(kakao_client))
+        logger.info("kakao_map_tools_registered", tools=3)
+    else:
+        logger.info("kakao_map_tools_skipped", reason="ARIA_KAKAO_REST_API_KEY not set")
+
+    # MCP Tools — 네이버 검색 (Client ID + Secret 설정 시에만 등록)
+    if config.naver_search.is_configured:
+        from aria.tools.mcp.naver_search_tools import (
+            NaverSearchClient,
+            NaverBlogSearchTool,
+            NaverNewsSearchTool,
+            NaverCafeSearchTool,
+            NaverShopSearchTool,
+            NaverKinSearchTool,
+            NaverLocalSearchTool,
+        )
+        naver_client = NaverSearchClient(config.naver_search)
+        tool_registry.register_executor(NaverBlogSearchTool(naver_client))
+        tool_registry.register_executor(NaverNewsSearchTool(naver_client))
+        tool_registry.register_executor(NaverCafeSearchTool(naver_client))
+        tool_registry.register_executor(NaverShopSearchTool(naver_client))
+        tool_registry.register_executor(NaverKinSearchTool(naver_client))
+        tool_registry.register_executor(NaverLocalSearchTool(naver_client))
+        logger.info("naver_search_tools_registered", tools=6)
+    else:
+        logger.info("naver_search_tools_skipped", reason="ARIA_NAVER_CLIENT_ID/SECRET not set")
+
+    # MCP Tools — TMAP 대중교통 (SK APP KEY 설정 시에만 등록)
+    if config.tmap.is_configured:
+        from aria.tools.mcp.tmap_tools import (
+            TmapClient,
+            TmapTransitRouteTool,
+        )
+        tmap_client = TmapClient(config.tmap)
+        tool_registry.register_executor(TmapTransitRouteTool(tmap_client))
+        logger.info("tmap_tools_registered", tools=1)
+    else:
+        logger.info("tmap_tools_skipped", reason="ARIA_TMAP_APP_KEY not set")
+
     react_agent = ReActAgent(
         llm_provider,
         vector_store,

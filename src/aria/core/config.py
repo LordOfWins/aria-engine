@@ -144,6 +144,58 @@ class NotionConfig(BaseSettings):
         return bool(self.token)
 
 
+class KakaoMapConfig(BaseSettings):
+    """카카오맵 로컬 API 설정
+
+    REST API 키 기반 인증 (OAuth 불필요)
+    발급: https://developers.kakao.com/console/app
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_KAKAO_", env_file=_get_env_file(), extra="ignore")
+
+    rest_api_key: str = Field(default="", description="카카오 REST API 키")
+    request_timeout: int = Field(default=10, ge=3, le=60, description="API 요청 타임아웃 (초)")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.rest_api_key)
+
+
+class NaverSearchConfig(BaseSettings):
+    """네이버 검색 + 지역 API 설정
+
+    Client ID / Secret 기반 인증
+    발급: https://developers.naver.com/apps/#/register
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_NAVER_", env_file=_get_env_file(), extra="ignore")
+
+    client_id: str = Field(default="", description="네이버 Client ID")
+    client_secret: str = Field(default="", description="네이버 Client Secret")
+    request_timeout: int = Field(default=10, ge=3, le=60, description="API 요청 타임아웃 (초)")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+
+class TmapConfig(BaseSettings):
+    """TMAP 대중교통 API 설정
+
+    SK Open API App Key 기반 인증
+    발급: https://openapi.sk.com/
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_TMAP_", env_file=_get_env_file(), extra="ignore")
+
+    app_key: str = Field(default="", description="SK Open API App Key")
+    request_timeout: int = Field(default=15, ge=5, le=60, description="API 요청 타임아웃 (초)")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.app_key)
+
+
 class AlertConfig(BaseSettings):
     """능동 알림 시스템 설정"""
 
@@ -178,6 +230,9 @@ class AriaConfig(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     notion: NotionConfig = Field(default_factory=NotionConfig)
+    kakao_map: KakaoMapConfig = Field(default_factory=KakaoMapConfig)
+    naver_search: NaverSearchConfig = Field(default_factory=NaverSearchConfig)
+    tmap: TmapConfig = Field(default_factory=TmapConfig)
     event: EventConfig = Field(default_factory=EventConfig)
     alert: AlertConfig = Field(default_factory=AlertConfig)
 
