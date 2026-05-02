@@ -182,6 +182,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.info("tmap_tools_skipped", reason="ARIA_TMAP_APP_KEY not set")
 
+    # MCP Tools — DuckDuckGo 웹 검색 (API 키 불필요 / 기본 활성화)
+    if config.ddg.is_configured:
+        from aria.tools.mcp.ddg_tools import (
+            DdgSearchClient,
+            DdgWebSearchTool,
+            DdgNewsSearchTool,
+        )
+        ddg_client = DdgSearchClient(config.ddg)
+        tool_registry.register_executor(DdgWebSearchTool(ddg_client))
+        tool_registry.register_executor(DdgNewsSearchTool(ddg_client))
+        logger.info("ddg_tools_registered", tools=2)
+    else:
+        logger.info("ddg_tools_skipped", reason="ARIA_DDG_ENABLED=false")
+
     react_agent = ReActAgent(
         llm_provider,
         vector_store,

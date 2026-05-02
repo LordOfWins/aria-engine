@@ -5,6 +5,7 @@
 - kakao_map: 카카오맵 장소 검색 / 주소→좌표 / 좌표→주소
 - naver_search: 네이버 블로그/뉴스/카페/쇼핑/지식iN/지역 검색
 - tmap: TMAP 대중교통 경로 검색
+- ddg: DuckDuckGo 웹/뉴스 검색 (API 키 불필요)
 """
 
 from aria.tools.mcp.notion_tools import (
@@ -28,6 +29,10 @@ from aria.tools.mcp.naver_search_tools import (
 from aria.tools.mcp.tmap_tools import (
     TmapTransitRouteTool,
 )
+from aria.tools.mcp.ddg_tools import (
+    DdgWebSearchTool,
+    DdgNewsSearchTool,
+)
 
 __all__ = [
     # Notion
@@ -47,4 +52,7 @@ __all__ = [
     "NaverLocalSearchTool",
     # TMAP
     "TmapTransitRouteTool",
+    # DuckDuckGo
+    "DdgWebSearchTool",
+    "DdgNewsSearchTool",
 ]

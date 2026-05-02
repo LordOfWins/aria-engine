@@ -196,6 +196,23 @@ class TmapConfig(BaseSettings):
         return bool(self.app_key)
 
 
+class DuckDuckGoConfig(BaseSettings):
+    """DuckDuckGo 웹 검색 설정
+
+    API 키 불필요 — duckduckgo-search 패키지 사용
+    글로벌/영어권 검색 + 한국어 검색 모두 지원
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARIA_DDG_", env_file=_get_env_file(), extra="ignore")
+
+    enabled: bool = Field(default=True, description="DuckDuckGo 검색 도구 활성화")
+    request_timeout: int = Field(default=10, ge=3, le=60, description="검색 타임아웃 (초)")
+
+    @property
+    def is_configured(self) -> bool:
+        return self.enabled
+
+
 class AlertConfig(BaseSettings):
     """능동 알림 시스템 설정"""
 
@@ -233,6 +250,7 @@ class AriaConfig(BaseSettings):
     kakao_map: KakaoMapConfig = Field(default_factory=KakaoMapConfig)
     naver_search: NaverSearchConfig = Field(default_factory=NaverSearchConfig)
     tmap: TmapConfig = Field(default_factory=TmapConfig)
+    ddg: DuckDuckGoConfig = Field(default_factory=DuckDuckGoConfig)
     event: EventConfig = Field(default_factory=EventConfig)
     alert: AlertConfig = Field(default_factory=AlertConfig)
 
