@@ -1,11 +1,11 @@
 """ARIA Engine - MCP Tool: DuckDuckGo 웹 검색
 
-duckduckgo-search 패키지 기반 도구 2종
+ddgs 패키지 기반 도구 2종 (구 duckduckgo-search에서 리네임)
 - DdgWebSearchTool: 웹 검색 (구글 대안 / 영어+한국어)
 - DdgNewsSearchTool: 뉴스 검색 (글로벌 + 한국 뉴스)
 
 인증: 불필요 (API 키 없음 / 무료 / 무제한)
-의존성: duckduckgo-search (pip install duckduckgo-search)
+의존성: ddgs (pip install ddgs)
 
 설계 원칙:
 - 외부 서비스 의존 제거 → 자체 검색 능력 확보
@@ -35,7 +35,7 @@ logger = structlog.get_logger()
 class DdgSearchClient:
     """DuckDuckGo 검색 클라이언트
 
-    duckduckgo-search 패키지의 DDGS 래퍼
+    ddgs 패키지의 DDGS 래퍼 (구 duckduckgo-search에서 리네임)
     API 키 불필요 / 무료 / rate limit은 있으나 개인 사용에 충분
 
     Args:
@@ -51,18 +51,18 @@ class DdgSearchClient:
         region: str = "wt-wt",
         max_results: int = 5,
     ) -> list[dict[str, Any]]:
-        """웹 검색 (동기 — duckduckgo-search는 동기 API)
+        """웹 검색 (동기 — ddgs는 동기 API)
 
         Args:
             query: 검색 쿼리
             region: 지역 코드 (wt-wt: 전세계 / kr-kr: 한국)
             max_results: 최대 결과 수 (1~20)
         """
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         with DDGS(timeout=self._config.request_timeout) as ddgs:
             results = list(ddgs.text(
-                keywords=query,
+                query,
                 region=region,
                 max_results=min(max(max_results, 1), 20),
             ))
@@ -81,11 +81,11 @@ class DdgSearchClient:
             region: 지역 코드 (wt-wt: 전세계 / kr-kr: 한국)
             max_results: 최대 결과 수 (1~20)
         """
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         with DDGS(timeout=self._config.request_timeout) as ddgs:
             results = list(ddgs.news(
-                keywords=query,
+                query,
                 region=region,
                 max_results=min(max(max_results, 1), 20),
             ))

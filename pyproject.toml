@@ -35,7 +35,7 @@ dependencies = [
     "httpx>=0.28.0",
 
     # === Web Search ===
-    "duckduckgo-search>=7.0.0",
+    "ddgs>=9.0.0",
 
     # === Logging & Observability ===
     "structlog>=24.4.0",

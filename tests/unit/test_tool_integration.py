@@ -276,7 +276,7 @@ class TestAgentReasonWithTools:
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_loop(self) -> None:
-        """도구 여러 번 호출 후 텍스트 응답"""
+        """도구 여러 번 호출 후 텍스트 응답 (매 호출 다른 파라미터)"""
         llm = MagicMock()
         vs = MagicMock()
         registry = ToolRegistry()
@@ -299,7 +299,7 @@ class TestAgentReasonWithTools:
                         "type": "function",
                         "function": {
                             "name": "counter_tool",
-                            "arguments": "{}",
+                            "arguments": json.dumps({"step": call_count}),
                         },
                     }],
                 }
@@ -320,7 +320,7 @@ class TestAgentReasonWithTools:
 
     @pytest.mark.asyncio
     async def test_max_tool_iterations_enforced(self) -> None:
-        """MAX_TOOL_ITERATIONS 초과 시 루프 종료"""
+        """MAX_TOOL_ITERATIONS 초과 시 루프 종료 (매 호출 다른 파라미터)"""
         llm = MagicMock()
         vs = MagicMock()
         registry = ToolRegistry()
@@ -328,25 +328,6 @@ class TestAgentReasonWithTools:
         registry.register_executor(counter)
 
         agent = ReActAgent(llm, vs, tool_registry=registry)
-
-        call_count = 0
-
-        async def mock_complete_always_tool(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            # 항상 도구 호출 (무한루프 시도)
-            return {
-                "content": "",
-                "model": "test",
-                "tool_calls": [{
-                    "id": f"call_{call_count:03d}",
-                    "type": "function",
-                    "function": {
-                        "name": "counter_tool",
-                        "arguments": "{}",
-                    },
-                }],
-            }
 
         # 마지막에 도구 없이 호출하는 fallback도 목
         side_effects = []
@@ -357,7 +338,10 @@ class TestAgentReasonWithTools:
                 "tool_calls": [{
                     "id": f"call_{i:03d}",
                     "type": "function",
-                    "function": {"name": "counter_tool", "arguments": "{}"},
+                    "function": {
+                        "name": "counter_tool",
+                        "arguments": json.dumps({"iteration": i}),
+                    },
                 }],
             })
         # MAX 도달 후 마지막 LLM 호출 (도구 없이)

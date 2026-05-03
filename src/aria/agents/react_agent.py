@@ -10,6 +10,7 @@ Think → Act → Observe 루프 기반 자율 추론 에이전트
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ class AgentState:
     error: str = ""  # 에러 메시지 전달용
     memory_context: str = ""  # 메모리 마크다운 (Layer 1 주입)
     tool_calls_made: int = 0  # 도구 호출 총 횟수 (비용 추적용)
+    tool_call_history: list[str] = field(default_factory=list)  # 도구 호출 이력 (중복 방지: "name|args_hash")
 
 
 INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다.
@@ -128,6 +130,14 @@ SELF_REFLECTION_SYSTEM = """당신은 답변 품질 평가 전문가입니다.
 3. 논리적 오류가 없는가?
 4. 사용자의 숨겨진 의도도 충족하는가?
 
+중요 — 외부 도구 API 응답에 대한 판단 규칙:
+- 외부 도구(카카오맵, 네이버 검색, DuckDuckGo, TMAP, Notion 등)가 반환한 데이터는 실제 API 응답입니다
+- 도구 API가 성공적으로 데이터를 반환했다면 이는 할루시네이션이 아닙니다
+- 도구 응답 데이터를 "근거 불충분"으로 판단하지 마세요
+- 도구가 성공적으로 결과를 반환한 답변의 quality_score는 최소 0.6 이상이어야 합니다
+- should_retry는 답변이 질문과 무관하거나 논리적 오류가 있을 때만 true로 설정하세요
+- 동일한 도구를 같은 파라미터로 다시 호출해도 결과는 동일하므로 재시도가 무의미합니다
+
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요.
 {{
     "quality_score": 0.0~1.0,
@@ -141,6 +151,9 @@ SELF_REFLECTION_USER = """## 원래 질문
 
 ## 사용자의 실제 의도
 {intent}
+
+## 도구 사용 여부
+{tool_usage_info}
 
 ## 현재 답변
 {answer}"""
@@ -528,6 +541,7 @@ class ReActAgent:
 
         tool_calls_made = state.tool_calls_made
         tool_observations: list[str] = []
+        tool_call_history = list(state.tool_call_history)  # 이력 복사 (immutability)
 
         try:
             for tool_iter in range(MAX_TOOL_ITERATIONS):
@@ -562,6 +576,27 @@ class ReActAgent:
                         func_args = json.loads(func_args_str) if func_args_str else {}
                     except json.JSONDecodeError:
                         func_args = {}
+
+                    # === 동일 도구+파라미터 재호출 방지 ===
+                    call_signature = f"{func_name}|{hashlib.md5(func_args_str.encode()).hexdigest()}"
+                    if call_signature in tool_call_history:
+                        logger.warning(
+                            "duplicate_tool_call_blocked",
+                            tool=func_name,
+                            args_preview=func_args_str[:100],
+                        )
+                        # 중복 호출 시 이전 결과 안내 메시지로 대체
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": (
+                                f"[중복 호출 차단] '{func_name}'에 동일한 파라미터로 "
+                                f"이미 호출한 적이 있습니다. 이전 응답을 참고하세요."
+                            ),
+                        })
+                        continue
+
+                    tool_call_history.append(call_signature)
 
                     # ToolRegistry로 실행 (Critic 평가 포함)
                     tool_result = await self.tool_registry.execute(
@@ -603,6 +638,7 @@ class ReActAgent:
                             "reasoning_steps": new_steps,
                             "iteration": state.iteration + 1,
                             "tool_calls_made": tool_calls_made,
+                            "tool_call_history": tool_call_history,
                         }
 
             # 최종 답변 (도구 루프 후 LLM의 마지막 텍스트 응답)
@@ -645,18 +681,36 @@ class ReActAgent:
             "reasoning_steps": new_steps,
             "iteration": state.iteration + 1,
             "tool_calls_made": tool_calls_made,
+            "tool_call_history": tool_call_history,
         }
 
     async def _self_reflect(self, state: AgentState) -> dict[str, Any]:
-        """Step 4: 자기 성찰 - 답변 품질 평가"""
+        """Step 4: 자기 성찰 - 답변 품질 평가
+
+        도구 호출 성공 시:
+        - confidence 하한선 0.6 적용 (API 응답을 할루시네이션으로 오판 방지)
+        - 동일 도구+파라미터 재호출 방지 (should_retry 억제)
+        """
         # 최대 반복 횟수 도달 시 성찰 스킵 (비용 절감)
         if state.iteration >= MAX_ITERATIONS:
             logger.info("self_reflect_skipped", reason="max_iterations_reached")
             return {"confidence": 0.6, "should_stop": True}
 
+        # 도구 사용 여부 정보 생성 (LLM에게 컨텍스트 제공)
+        tools_used = state.tool_calls_made > 0
+        if tools_used:
+            tool_usage_info = (
+                f"이 답변은 외부 도구를 {state.tool_calls_made}회 호출하여 "
+                f"실제 API 응답 데이터를 기반으로 생성되었습니다. "
+                f"도구 응답 데이터는 할루시네이션이 아닌 실제 정보입니다."
+            )
+        else:
+            tool_usage_info = "외부 도구 사용 없이 LLM 자체 지식으로 답변했습니다."
+
         user_prompt = SELF_REFLECTION_USER.format(
             query=state.query,
             intent=str(state.intent),
+            tool_usage_info=tool_usage_info,
             answer=state.current_answer[:2000],  # 너무 긴 답변은 잘라서 평가
         )
 
@@ -686,10 +740,32 @@ class ReActAgent:
         confidence = reflection.get("quality_score", 0.7)
         should_retry = reflection.get("should_retry", False)
 
+        # === 도구 호출 성공 시 confidence 하한선 + retry 억제 ===
+        if tools_used:
+            # 도구 API가 성공적으로 데이터를 반환했으면 최소 0.6 보장
+            if confidence < 0.6:
+                logger.info(
+                    "confidence_floor_applied",
+                    original=confidence,
+                    adjusted=0.6,
+                    reason="tool_api_response_is_factual",
+                )
+                confidence = 0.6
+
+            # 동일 도구+파라미터 재호출은 같은 결과를 반환하므로 retry 무의미
+            if should_retry:
+                logger.info(
+                    "retry_suppressed",
+                    reason="tool_responses_are_deterministic",
+                    tool_calls_made=state.tool_calls_made,
+                )
+                should_retry = False
+
         logger.info(
             "self_reflection_result",
             confidence=confidence,
             should_retry=should_retry,
+            tools_used=tools_used,
             issues=reflection.get("issues", []),
         )
 
