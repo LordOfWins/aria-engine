@@ -44,3 +44,6 @@ qdrant_data/
 logs/
 *.log
 memory/
+
+# Runtime event data
+events/
