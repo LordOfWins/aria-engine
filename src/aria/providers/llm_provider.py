@@ -12,6 +12,7 @@ LiteLLM 기반 멀티 프로바이더 LLM 호출
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -19,12 +20,6 @@ from typing import Any
 
 import litellm
 import structlog
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from aria.core.config import AriaConfig, get_config
 from aria.core.exceptions import (
@@ -197,6 +192,30 @@ class LLMProvider:
         )
         return record
 
+    # 모델별 최대 재시도 횟수 (rate limit / 일시적 에러)
+    _MAX_RETRIES_PER_MODEL = 3
+
+    @staticmethod
+    def _get_retry_after(error: Exception) -> float:
+        """RateLimitError 응답에서 Retry-After 대기 시간(초) 추출
+
+        Anthropic API는 Retry-After 헤더로 권장 대기 시간을 반환.
+        헤더가 없거나 파싱 실패 시 0.0 반환 (호출부에서 기본 백오프 적용).
+        """
+        try:
+            response = getattr(error, "response", None)
+            if response is None:
+                return 0.0
+            headers = getattr(response, "headers", None)
+            if headers is None:
+                return 0.0
+            retry_after = headers.get("retry-after") or headers.get("Retry-After")
+            if retry_after is None:
+                return 0.0
+            return float(retry_after)
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
+
     async def _call_llm_with_fallback(
         self,
         kwargs_base: dict[str, Any],
@@ -204,6 +223,11 @@ class LLMProvider:
         explicit_model: str | None = None,
     ) -> Any:
         """Fallback 체인을 따라 LLM 호출 시도
+
+        재시도 전략:
+        - Rate limit / 서버 에러: 모델별 최대 3회 재시도 (지수 백오프 + Retry-After)
+        - 인증 에러 / Bad Request: 재시도 없이 즉시 다음 모델로
+        - 모든 모델 실패 시 LLMAllProvidersExhaustedError
 
         Args:
             kwargs_base: litellm.acompletion에 전달할 파라미터 (model 제외)
@@ -252,77 +276,92 @@ class LLMProvider:
         attempts: list[dict] = []
 
         for i, model in enumerate(unique_chain):
-            try:
-                kwargs = {**kwargs_base, "model": model}
-                response = await litellm.acompletion(**kwargs)
-                return response
-
-            except _RETRYABLE_EXCEPTIONS as e:
-                # Rate limit / 서버 에러: 같은 모델 1회 재시도 후 다음 모델로
-                logger.warning(
-                    "llm_retryable_error",
-                    model=model,
-                    error_type=type(e).__name__,
-                    error=str(e)[:200],
-                    attempt=i + 1,
-                )
-                attempts.append({
-                    "model": model,
-                    "error_type": type(e).__name__,
-                    "error": str(e)[:200],
-                    "retryable": True,
-                })
-
-                # 같은 모델 1회 재시도 (exponential backoff)
-                import asyncio
-                await asyncio.sleep(min(2 ** i, 8))
+            # 모델별 최대 _MAX_RETRIES_PER_MODEL회 재시도
+            for retry in range(self._MAX_RETRIES_PER_MODEL + 1):  # 0 = 첫 시도, 1~3 = 재시도
                 try:
-                    response = await litellm.acompletion(**{**kwargs_base, "model": model})
+                    kwargs = {**kwargs_base, "model": model}
+                    response = await litellm.acompletion(**kwargs)
                     return response
-                except Exception:
+
+                except _RETRYABLE_EXCEPTIONS as e:
+                    is_last_retry = retry >= self._MAX_RETRIES_PER_MODEL
+
+                    # Retry-After 헤더 기반 대기 시간 결정
+                    retry_after = self._get_retry_after(e)
+                    # 헤더 없으면 지수 백오프: 2s → 4s → 8s (retry 0→1→2)
+                    backoff = max(retry_after, min(2 ** (retry + 1), 16))
+
+                    logger.warning(
+                        "llm_retryable_error",
+                        model=model,
+                        error_type=type(e).__name__,
+                        error=str(e)[:200],
+                        retry=retry + 1,
+                        max_retries=self._MAX_RETRIES_PER_MODEL,
+                        backoff_seconds=f"{backoff:.1f}s",
+                        retry_after_header=f"{retry_after:.1f}s" if retry_after > 0 else "none",
+                        will_retry=not is_last_retry,
+                    )
+                    attempts.append({
+                        "model": model,
+                        "error_type": type(e).__name__,
+                        "error": str(e)[:200],
+                        "retryable": True,
+                        "retry": retry + 1,
+                    })
+
+                    if is_last_retry:
+                        # 최대 재시도 소진 → 다음 모델로 fallback
+                        if i < len(unique_chain) - 1:
+                            logger.info(
+                                "fallback_triggered",
+                                from_model=model,
+                                to_model=unique_chain[i + 1],
+                                reason=f"max_retries_exhausted ({self._MAX_RETRIES_PER_MODEL})",
+                            )
+                        break  # 내부 retry 루프 탈출 → 외부 model 루프 continue
+
+                    # 재시도 전 대기
+                    await asyncio.sleep(backoff)
+
+                except litellm.AuthenticationError as e:
+                    # API 키 에러: 재시도 무의미 → 즉시 다음 모델로
+                    logger.error("llm_auth_error", model=model, error=str(e)[:200])
+                    attempts.append({
+                        "model": model,
+                        "error_type": "AuthenticationError",
+                        "error": str(e)[:200],
+                        "retryable": False,
+                    })
                     if i < len(unique_chain) - 1:
                         logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
-                    continue
+                    break  # 내부 retry 루프 탈출
 
-            except litellm.AuthenticationError as e:
-                # API 키 에러: 해당 프로바이더 스킵 → 다음 모델로
-                logger.error("llm_auth_error", model=model, error=str(e)[:200])
-                attempts.append({
-                    "model": model,
-                    "error_type": "AuthenticationError",
-                    "error": str(e)[:200],
-                    "retryable": False,
-                })
-                if i < len(unique_chain) - 1:
-                    logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
-                continue
+                except litellm.BadRequestError as e:
+                    # 잘못된 요청 (컨텍스트 초과 등): 재시도 무의미
+                    logger.error("llm_bad_request", model=model, error=str(e)[:200])
+                    attempts.append({
+                        "model": model,
+                        "error_type": "BadRequestError",
+                        "error": str(e)[:200],
+                        "retryable": False,
+                    })
+                    if i < len(unique_chain) - 1:
+                        logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
+                    break  # 내부 retry 루프 탈출
 
-            except litellm.BadRequestError as e:
-                # 잘못된 요청 (컨텍스트 초과 등): 재시도 무의미
-                logger.error("llm_bad_request", model=model, error=str(e)[:200])
-                attempts.append({
-                    "model": model,
-                    "error_type": "BadRequestError",
-                    "error": str(e)[:200],
-                    "retryable": False,
-                })
-                # 컨텍스트 길이 초과는 다른 모델에서도 발생할 수 있지만 시도는 함
-                if i < len(unique_chain) - 1:
-                    logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
-                continue
-
-            except Exception as e:
-                # 기타 예상 못한 에러
-                logger.error("llm_unexpected_error", model=model, error_type=type(e).__name__, error=str(e)[:200])
-                attempts.append({
-                    "model": model,
-                    "error_type": type(e).__name__,
-                    "error": str(e)[:200],
-                    "retryable": False,
-                })
-                if i < len(unique_chain) - 1:
-                    logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
-                continue
+                except Exception as e:
+                    # 기타 예상 못한 에러
+                    logger.error("llm_unexpected_error", model=model, error_type=type(e).__name__, error=str(e)[:200])
+                    attempts.append({
+                        "model": model,
+                        "error_type": type(e).__name__,
+                        "error": str(e)[:200],
+                        "retryable": False,
+                    })
+                    if i < len(unique_chain) - 1:
+                        logger.info("fallback_triggered", from_model=model, to_model=unique_chain[i + 1])
+                    break  # 내부 retry 루프 탈출
 
         # 모든 모델 실패
         raise LLMAllProvidersExhaustedError(attempts)

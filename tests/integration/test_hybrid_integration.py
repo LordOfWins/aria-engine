@@ -171,8 +171,8 @@ class TestPromptCachingIntegration:
     """Prompt Caching 파라미터 전달 검증"""
 
     @pytest.mark.asyncio
-    async def test_intent_analysis_uses_cache(self) -> None:
-        """_analyze_intent에서 cache_system_prompt=True 전달 확인"""
+    async def test_intent_analysis_no_cache(self) -> None:
+        """_analyze_intent에서 cache_system_prompt 미사용 확인 (cheap 모델은 캐시 최소 토큰 미달)"""
         from aria.agents.react_agent import ReActAgent, AgentState
 
         mock_llm = MagicMock()
@@ -188,9 +188,9 @@ class TestPromptCachingIntegration:
         state = AgentState(query="테스트 질문")
         await agent._analyze_intent(state)
 
-        # complete 호출 시 cache_system_prompt=True가 전달되었는지 확인
+        # cheap 모델(Haiku)은 최소 캐시 요구 4096 토큰 → cache_system_prompt 미전달
         call_kwargs = mock_llm.complete.call_args
-        assert call_kwargs.kwargs.get("cache_system_prompt") is True
+        assert call_kwargs.kwargs.get("cache_system_prompt") is None or call_kwargs.kwargs.get("cache_system_prompt") is False
         assert call_kwargs.kwargs.get("system_prompt") is not None
 
     @pytest.mark.asyncio
@@ -221,8 +221,8 @@ class TestPromptCachingIntegration:
         assert call_kwargs.kwargs.get("cache_system_prompt") is True
 
     @pytest.mark.asyncio
-    async def test_self_reflect_uses_cache(self) -> None:
-        """_self_reflect에서 cache_system_prompt=True 전달 확인"""
+    async def test_self_reflect_no_cache(self) -> None:
+        """_self_reflect에서 cache_system_prompt 미사용 확인 (cheap 모델은 캐시 최소 토큰 미달)"""
         from aria.agents.react_agent import ReActAgent, AgentState
 
         mock_llm = MagicMock()
@@ -243,8 +243,9 @@ class TestPromptCachingIntegration:
         )
         await agent._self_reflect(state)
 
+        # cheap 모델(Haiku)은 최소 캐시 요구 4096 토큰 → cache_system_prompt 미전달
         call_kwargs = mock_llm.complete.call_args
-        assert call_kwargs.kwargs.get("cache_system_prompt") is True
+        assert call_kwargs.kwargs.get("cache_system_prompt") is None or call_kwargs.kwargs.get("cache_system_prompt") is False
 
 
 class TestReActAgentHybridIntegration:

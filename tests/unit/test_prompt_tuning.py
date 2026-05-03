@@ -133,9 +133,11 @@ class TestReasoningSystemPrompt:
         assert "최종 답변만" in REASONING_SYSTEM or "최종 답변" in REASONING_SYSTEM
 
     def test_no_old_numbered_format(self):
-        """이전 번호 형식(1. 2. 3. 4. 5.)이 없어야 함"""
+        """이전 번호 형식(1. 현재까지/5. 확신도 (0~1))이 없어야 함
+        참고: <reasoning> 내부의 사고 단계 번호(1. 질문 이해 등)는 허용 (사용자에게 비공개)
+        """
         assert "1. 현재까지" not in REASONING_SYSTEM
-        assert "5. 확신도" not in REASONING_SYSTEM
+        assert "5. 확신도 (0" not in REASONING_SYSTEM  # 이전 형식: "5. 확신도 (0~1)"
 
 
 # === FAST_RESPOND_SYSTEM 프롬프트 검증 ===
