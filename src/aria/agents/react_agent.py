@@ -78,6 +78,26 @@ INTENT_ANALYSIS_SYSTEM = """당신은 사용자 의도 분석 전문가입니다
     "recommended_action": "search_knowledge|reason|respond|clarify"
 }}
 
+complexity 판단 기준:
+- simple: 인사, 잡담, 감사 표현 등 외부 정보가 필요 없는 대화
+- moderate: 외부 검색이나 도구 호출이 필요한 질문
+- complex: 여러 소스의 정보를 종합해야 하는 복잡한 질문
+
+recommended_action 판단 기준:
+- search_knowledge: 다음 유형의 질문은 반드시 search_knowledge로 분류하세요:
+  * 장소/위치 검색 (약국, 병원, 맛집, 카페 등 찾기)
+  * 길찾기/경로/교통 문의
+  * 실시간 정보 (뉴스, 날씨, 가격 등)
+  * 웹 검색이 필요한 최신 정보
+  * 특정 서비스/상품 검색
+  * "찾아줘", "검색해줘", "알려줘" + 구체적 대상
+- reason: 벡터DB 검색 없이 추론만으로 답변 가능한 전문 질문
+- respond: 인사, 잡담 등 외부 정보 없이 즉시 응답 가능한 대화
+- clarify: 질문이 모호하여 추가 정보가 필요한 경우
+
+중요: "~찾아줘", "~검색해줘", "~어디", "근처", "주변" 등 위치/검색 키워드가 포함된 질문은
+절대 simple/respond로 분류하지 마세요. 반드시 moderate/search_knowledge로 분류하세요.
+
 반드시 위 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요."""
 
 INTENT_ANALYSIS_USER = """사용자 질문: {query}"""

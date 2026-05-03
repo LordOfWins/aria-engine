@@ -426,3 +426,103 @@ class TestCostOptimization:
         )
         route = mock_agent._route_after_reflection(state_after)
         assert route == "respond"  # retry가 아닌 응답으로 종료
+
+
+# === INTENT_ANALYSIS_SYSTEM 도구 호출 라우팅 ===
+
+
+class TestIntentAnalysisPrompt:
+    """INTENT_ANALYSIS_SYSTEM에 도구 호출 필요 쿼리 분류 가이드 검증"""
+
+    def test_contains_location_search_guidance(self):
+        """위치/장소 검색 쿼리가 search_knowledge로 분류되는 가이드"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "장소" in INTENT_ANALYSIS_SYSTEM or "위치" in INTENT_ANALYSIS_SYSTEM
+        assert "약국" in INTENT_ANALYSIS_SYSTEM or "병원" in INTENT_ANALYSIS_SYSTEM
+
+    def test_contains_search_keywords_warning(self):
+        """'찾아줘/검색해줘/근처' 등 키워드가 simple이 되면 안 된다는 경고"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "찾아줘" in INTENT_ANALYSIS_SYSTEM
+        assert "simple/respond로 분류하지 마세요" in INTENT_ANALYSIS_SYSTEM
+
+    def test_simple_definition_is_greeting_only(self):
+        """simple은 인사/잡담으로 명확히 제한"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "인사" in INTENT_ANALYSIS_SYSTEM
+        assert "잡담" in INTENT_ANALYSIS_SYSTEM
+
+    def test_search_knowledge_includes_realtime_info(self):
+        """실시간 정보(뉴스/날씨 등)가 search_knowledge로 분류"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "실시간" in INTENT_ANALYSIS_SYSTEM or "뉴스" in INTENT_ANALYSIS_SYSTEM
+
+    def test_search_knowledge_includes_web_search(self):
+        """웹 검색 필요 쿼리가 search_knowledge로 분류"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "웹 검색" in INTENT_ANALYSIS_SYSTEM
+
+    def test_moderate_for_tool_required(self):
+        """도구 호출 필요 쿼리는 moderate 이상으로 분류"""
+        from aria.agents.react_agent import INTENT_ANALYSIS_SYSTEM
+        assert "moderate" in INTENT_ANALYSIS_SYSTEM
+        assert "도구" in INTENT_ANALYSIS_SYSTEM or "외부 검색" in INTENT_ANALYSIS_SYSTEM
+
+
+class TestIntentRouting:
+    """의도분석 결과에 따른 라우팅 결정 검증"""
+
+    @pytest.fixture
+    def mock_agent(self):
+        llm = MagicMock(spec_set=["complete", "complete_with_messages", "get_cost_summary"])
+        vector_store = MagicMock()
+        return ReActAgent(llm, vector_store)
+
+    def test_simple_respond_goes_to_fast_respond(self, mock_agent):
+        """simple + respond → fast_respond"""
+        state = AgentState(
+            query="안녕",
+            intent={"complexity": "simple", "recommended_action": "respond"},
+        )
+        assert mock_agent._route_after_intent(state) == "fast_respond"
+
+    def test_moderate_search_goes_to_search(self, mock_agent):
+        """moderate + search_knowledge → search_knowledge (도구 호출 경로)"""
+        state = AgentState(
+            query="남양주 약국 찾아줘",
+            intent={"complexity": "moderate", "recommended_action": "search_knowledge"},
+        )
+        assert mock_agent._route_after_intent(state) == "search_knowledge"
+
+    def test_moderate_respond_goes_to_reason(self, mock_agent):
+        """moderate + respond → reason (검색 스킵 / 추론 수행)"""
+        state = AgentState(
+            query="파이썬이 뭐야",
+            intent={"complexity": "moderate", "recommended_action": "respond"},
+        )
+        assert mock_agent._route_after_intent(state) == "reason"
+
+    def test_complex_search_goes_to_search(self, mock_agent):
+        """complex + search_knowledge → search_knowledge"""
+        state = AgentState(
+            query="남양주에서 서울역까지 대중교통 경로",
+            intent={"complexity": "complex", "recommended_action": "search_knowledge"},
+        )
+        assert mock_agent._route_after_intent(state) == "search_knowledge"
+
+    def test_simple_clarify_goes_to_fast_respond(self, mock_agent):
+        """simple + clarify → fast_respond"""
+        state = AgentState(
+            query="뭐?",
+            intent={"complexity": "simple", "recommended_action": "clarify"},
+        )
+        assert mock_agent._route_after_intent(state) == "fast_respond"
+
+    def test_default_fallback_is_search(self, mock_agent):
+        """알 수 없는 action → search_knowledge (안전 기본값)"""
+        state = AgentState(
+            query="테스트",
+            intent={"complexity": "moderate", "recommended_action": "unknown_action"},
+        )
+        assert mock_agent._route_after_intent(state) == "search_knowledge"
+
